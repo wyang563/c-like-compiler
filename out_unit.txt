@@ -1,2 +1,0 @@
-Parsed file: "tests/experiment.txt" 
-

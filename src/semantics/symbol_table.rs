@@ -27,6 +27,15 @@ impl Entry {
             Entry::Import(_) => Type::Int,
         }
     }
+
+    pub fn get_id(&self) -> usize {
+        match self {
+            Entry::Var(v) => v.id,
+            Entry::Array(a) => a.id,
+            Entry::Method(m) => m.id,
+            Entry::Import(i) => i.id,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -86,9 +95,17 @@ pub struct ImportEntry {
 }
 
 #[derive(Clone)]
+#[derive(Debug)]
 pub struct Table {
     pub method_return_type: Type,
     pub entries: HashMap<String, Entry>,
     pub scope_ind: usize,
     pub parent_ind: Option<usize>,
+    pub children_inds: Vec<usize>,
+}
+
+#[derive(Debug)]
+pub struct SymbolTable {
+    pub vars: Vec<Box<Entry>>,
+    pub scopes: Vec<Box<Table>>,
 }

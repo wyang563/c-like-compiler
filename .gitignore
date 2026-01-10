@@ -12,6 +12,8 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+*.DS_Store*
+*._target*
 
 # IDEs
 .vscode/
@@ -23,4 +25,6 @@ out.txt
 out_unit.txt
 
 # Text files 
-*.txt
+*.txt*
+*tmp*
+tmp.out

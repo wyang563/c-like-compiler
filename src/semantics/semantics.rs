@@ -1,5 +1,3 @@
-use crate::parser::AST::ASTNode;
-
 use super::super::parser::parser::parse_file;
 use super::super::parser::AST;
 use super::super::parser::visitor::Visitor;
@@ -10,6 +8,7 @@ use super::symbol_table::{Entry,
                           ImportEntry,
                           Table,
                           Type,
+                          SymbolTable
                         };
 
 use core::panic;
@@ -17,6 +16,7 @@ use std::collections::HashMap;
 
 pub struct Interpreter {
     scopes: Vec<Box<Table>>, // vec of scopes which scope graph will reference by index
+    vars: Vec<Box<Entry>>,
     errors: Vec<String>,
     correct: bool,
 
@@ -96,13 +96,15 @@ impl Interpreter {
                             .name
                             .as_str();
         let arg_type = self.string_to_type(arg.type_name.as_str());
-        return VarEntry {
+        let var_entry = VarEntry {
             name: arg_name.to_string(),
             var_type: arg_type.clone(),
             is_const: false,
             scope: self.cur_scope_ind,
             id: self.incr_var_count(),
         };
+        self.vars.push(Box::new(Entry::Var(var_entry.clone())));
+        return var_entry;
     }
 
     fn push_error(&mut self, error: &str) {
@@ -170,6 +172,7 @@ impl Visitor for Interpreter {
             scope: self.cur_scope_ind,
             id: self.incr_var_count(),
         };
+        self.vars.push(Box::new(Entry::Import(import_entry.clone())));
         self.write_to_table(import_id.as_str(), Entry::Import(import_entry));
     }
 
@@ -197,13 +200,17 @@ impl Visitor for Interpreter {
             param_list: vec![],
             param_count: method_decl.args.len(),
             scope: self.cur_scope_ind,
-            id: self.incr_var_count(),
+            id: 0,
         };
 
         for arg in &method_decl.args {
             method_entry.param_list.push(self.extract_method_arg_var(arg.as_ref()));
         }
+        method_entry.id = self.incr_var_count();
+        self.vars.push(Box::new(Entry::Method(method_entry.clone())));
+
         self.write_to_table(method_decl.name.name.as_str(), Entry::Method(method_entry));
+        
 
         // create new scope
         let method_table = Table {
@@ -211,10 +218,15 @@ impl Visitor for Interpreter {
             method_return_type: method_type.clone(),
             scope_ind: self.scopes.len(),
             parent_ind: Some(self.cur_scope_ind),
+            children_inds: vec![],
         };
 
         self.scopes.push(Box::new(method_table));
+
+        // add children to parent 
         self.cur_scope_ind = self.scopes.len() - 1;
+        let parent_ind = self.scopes[self.cur_scope_ind].parent_ind.unwrap();
+        self.scopes[parent_ind].children_inds.push(self.cur_scope_ind);
 
         // add method args to scope
         for arg in &method_decl.args {
@@ -231,9 +243,14 @@ impl Visitor for Interpreter {
                 method_return_type: cur_scope.method_return_type.clone(),
                 scope_ind: self.scopes.len(),
                 parent_ind: Some(self.cur_scope_ind),
+                children_inds: vec![],
             };
             self.scopes.push(Box::new(block_table));
+
+            // add children to parent inds childs array
             self.cur_scope_ind = self.scopes.len() - 1;
+            let parent_ind = self.scopes[self.cur_scope_ind].parent_ind.unwrap();
+            self.scopes[parent_ind].children_inds.push(self.cur_scope_ind);
         }
         self.init_method = false;
 
@@ -306,13 +323,15 @@ impl Visitor for Interpreter {
             };
 
             let var_id = self.incr_var_count();
-            self.write_to_table(var_name, Entry::Array( ArrayEntry {
+            let array_entry = ArrayEntry {
                 name: var_name.to_string(),
                 var_type: array_type,
                 is_const: var_decl.is_const,
                 scope: self.cur_scope_ind,
                 id: var_id,
-            }));
+            }; 
+            self.vars.push(Box::new(Entry::Array(array_entry.clone())));
+            self.write_to_table(var_name, Entry::Array(array_entry));
         } 
         
         else {
@@ -324,13 +343,15 @@ impl Visitor for Interpreter {
             }
 
             let var_id = self.incr_var_count();
-            self.write_to_table(var_name, Entry::Var( VarEntry {
+            let var_entry = VarEntry {
                 name: var_name.to_string(),
                 var_type: self.init_type.clone(),
                 is_const: var_decl.is_const,
                 scope: self.cur_scope_ind,
                 id: var_id,
-            }));
+            };
+            self.vars.push(Box::new(Entry::Var(var_entry.clone())));
+            self.write_to_table(var_name, Entry::Var(var_entry));
         }
     }
 
@@ -889,7 +910,7 @@ impl Visitor for Interpreter {
     }
 }
 
-pub fn interpret_file(input: &std::path::PathBuf, debug: bool) -> Result<Vec<Box<Table>>, Vec<String>> {
+pub fn interpret_file(input: &std::path::PathBuf, debug: bool) -> Result<SymbolTable, Vec<String>> {
     let _input = std::fs::read_to_string(input).expect("Filename is incorrect.");
     match parse_file(input) {
         Ok(ast) => {
@@ -898,11 +919,13 @@ pub fn interpret_file(input: &std::path::PathBuf, debug: bool) -> Result<Vec<Box
                 entries: HashMap::new(),
                 scope_ind: 0,
                 parent_ind: None,
+                children_inds: vec![],
             };
             let scopes = vec![Box::new(global_scope)];
 
             let mut interpreter = Interpreter {
                 scopes: scopes,
+                vars: vec![],
                 errors: vec![],
                 correct: true,
                 checking_type: false,
@@ -919,10 +942,11 @@ pub fn interpret_file(input: &std::path::PathBuf, debug: bool) -> Result<Vec<Box
 
             ast.accept(&mut interpreter);
 
-            // create final symbol table
-
             if interpreter.correct {
-                return Ok(interpreter.scopes);
+                return Ok(SymbolTable {
+                    vars: interpreter.vars,
+                    scopes: interpreter.scopes,
+                });
             } else {
                 return Err(interpreter.errors);
             }

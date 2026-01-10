@@ -1,9 +1,0 @@
-.idea/
-venv/
-.DS_Store
-*.zip
-*.iml
-target/
-tmp/
-package/
-github/data/
