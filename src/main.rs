@@ -1,3 +1,4 @@
+mod assembler;
 mod cfg;
 mod parser;
 mod scanner;
@@ -37,6 +38,8 @@ fn main() {
         utils::cli::CompilerAction::Inter => {
             semantics::semantics::interpret(&args.input, writer, args.debug);
         }
-        utils::cli::CompilerAction::Assembly => {}
+        utils::cli::CompilerAction::Assembly => {
+            assembler::assembler::assemble(&args.input, writer, args.debug);
+        }
     }
 }

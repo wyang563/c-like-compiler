@@ -1,4 +1,2 @@
-#![allow(dead_code)]
-
-pub mod cfg;
+pub mod ssa_cfg;
 pub mod three_address_code;
