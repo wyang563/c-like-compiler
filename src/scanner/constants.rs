@@ -1,21 +1,6 @@
-
 const RESERVED_LITERALS: &'static [&str] = &[
-    "bool",
-    "break",
-    "const",
-    "import",
-    "continue",
-    "else",
-    "false",
-    "for",
-    "while",
-    "if",
-    "int",
-    "return",
-    "len",
-    "long",
-    "true",
-    "void"
+    "bool", "break", "const", "import", "continue", "else", "false", "for", "while", "if", "int",
+    "return", "len", "long", "true", "void",
 ];
 
 pub fn is_whitespace(c: char) -> bool {
@@ -50,4 +35,3 @@ pub fn is_alphanumeric(c: char) -> bool {
 pub fn is_reserved_literal(c: &str) -> bool {
     return RESERVED_LITERALS.contains(&c);
 }
-

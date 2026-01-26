@@ -1,5 +1,5 @@
-use super::AST::{self};
 use super::visitor::Visitor;
+use super::AST::{self};
 
 pub struct ParserPrinter {
     indent: usize,
@@ -184,7 +184,6 @@ impl Visitor for ParserPrinter {
         method_call.name.accept(self);
         self.tab_print("(");
         for (i, arg) in method_call.args.iter().enumerate() {
-
             arg.accept(self);
             if i < method_call.args.len() - 1 {
                 self.tab_print(", ");
@@ -263,6 +262,3 @@ impl Visitor for ParserPrinter {
         self.tab_print(&char_constant.value);
     }
 }
-
-
-

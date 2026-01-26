@@ -1,8 +1,7 @@
 use super::visitor::Visitor;
 
 #[allow(dead_code)]
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ASTNode {
     Program(Program),
     ImportDecl(ImportDecl),
@@ -40,8 +39,7 @@ impl ASTNode {
 }
 
 // Top level declarations
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Program {
     pub imports: Vec<Box<ImportDecl>>,
     pub fields: Vec<Box<FieldDecl>>,
@@ -55,8 +53,7 @@ impl Program {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ImportDecl {
     pub import_id: Identifier,
 }
@@ -68,8 +65,7 @@ impl ImportDecl {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FieldDecl {
     pub type_name: String,
     pub is_const: bool,
@@ -83,9 +79,8 @@ impl FieldDecl {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
-pub struct MethodDecl{
+#[derive(Clone, Debug)]
+pub struct MethodDecl {
     pub type_name: String,
     pub name: Identifier,
     pub args: Vec<Box<MethodArgDecl>>,
@@ -99,11 +94,10 @@ impl MethodDecl {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Block {
     pub fields: Vec<Box<FieldDecl>>,
-    pub statements: Vec<Box<ASTNode>>, // statements of type specified by the grammar   
+    pub statements: Vec<Box<ASTNode>>, // statements of type specified by the grammar
 }
 
 impl Block {
@@ -113,8 +107,7 @@ impl Block {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VarDecl {
     pub name: Box<Identifier>,
     pub is_const: bool,
@@ -131,8 +124,7 @@ impl VarDecl {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MethodArgDecl {
     pub type_name: String,
     pub name: Box<Identifier>,
@@ -145,9 +137,8 @@ impl MethodArgDecl {
     }
 }
 
-// Statements 
-#[derive(Clone)]
-#[derive(Debug)]
+// Statements
+#[derive(Clone, Debug)]
 pub struct IfStatement {
     pub condition: Box<ASTNode>, // any expression type specified by the grammar
     pub then_block: Box<Block>,
@@ -161,8 +152,7 @@ impl IfStatement {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ForStatement {
     pub start_assignment: Box<Assignment>,
     pub end_expr: Box<ASTNode>,
@@ -177,8 +167,7 @@ impl ForStatement {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WhileStatement {
     pub condition: Box<ASTNode>, // any expression type specified by the grammar
     pub block: Box<Block>,
@@ -191,10 +180,9 @@ impl WhileStatement {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReturnStatement {
-    pub func_type: String, // either void or type name
+    pub func_type: String,          // either void or type name
     pub expr: Box<Option<ASTNode>>, // any expression type specified by the grammar
 }
 
@@ -205,8 +193,7 @@ impl ReturnStatement {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StatementControl {
     pub op: String, // either Break or Continue
 }
@@ -219,11 +206,10 @@ impl StatementControl {
 }
 
 // Assignments
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Assignment {
     pub assign_var: Box<ASTNode>, // either an identifier or an index expression
-    pub assign_op: String, 
+    pub assign_op: String,
     pub expr: Box<Option<ASTNode>>, // any expression type specified by the grammar
 }
 
@@ -235,8 +221,7 @@ impl Assignment {
 }
 
 // Expressions
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MethodCall {
     pub name: Box<Identifier>,
     pub args: Vec<Box<ASTNode>>,
@@ -249,8 +234,7 @@ impl MethodCall {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LenCall {
     pub id: Box<Identifier>,
 }
@@ -262,8 +246,7 @@ impl LenCall {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IntCast {
     pub cast_expr: Box<ASTNode>,
 }
@@ -275,8 +258,7 @@ impl IntCast {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LongCast {
     pub cast_expr: Box<ASTNode>,
 }
@@ -288,8 +270,7 @@ impl LongCast {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UnaryExpression {
     pub op: String,
     pub expr: Box<ASTNode>,
@@ -302,12 +283,11 @@ impl UnaryExpression {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BinaryExpression {
     pub op: String,
     pub left_expr: Box<ASTNode>,
-    pub right_expr: Box<ASTNode>
+    pub right_expr: Box<ASTNode>,
 }
 
 impl BinaryExpression {
@@ -320,10 +300,9 @@ impl BinaryExpression {
 /*
 For location case <id> '[' <expr> ']'
 */
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IndexExpression {
-    pub id: Box<Identifier>, 
+    pub id: Box<Identifier>,
     pub idx_expr: Box<ASTNode>,
 }
 
@@ -335,8 +314,7 @@ impl IndexExpression {
 }
 
 // Base Constants and Identifiers
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ArrayLiteral {
     pub array_values: Vec<Box<ASTNode>>,
 }
@@ -348,10 +326,9 @@ impl ArrayLiteral {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Identifier {
-    pub name: String, 
+    pub name: String,
     pub status: i32, // 0 for declare, 1 for read, 2 for write
 }
 
@@ -365,8 +342,7 @@ impl Identifier {
 /*
 Stores both decimal and hex numbers
 */
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct IntConstant {
     pub is_neg: bool,
     pub value: String,
@@ -379,8 +355,7 @@ impl IntConstant {
     }
 }
 
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LongConstant {
     pub is_neg: bool,
     pub value: String,
@@ -393,8 +368,7 @@ impl LongConstant {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StringConstant {
     pub value: String,
 }
@@ -406,8 +380,7 @@ impl StringConstant {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BoolConstant {
     pub value: bool,
 }
@@ -419,8 +392,7 @@ impl BoolConstant {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CharConstant {
     pub value: String,
 }
@@ -431,4 +403,3 @@ impl CharConstant {
         visitor.visit_char_constant(self);
     }
 }
-

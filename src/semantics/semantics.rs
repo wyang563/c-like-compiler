@@ -1,15 +1,9 @@
 use super::super::parser::parser::parse_file;
-use super::super::parser::AST;
 use super::super::parser::visitor::Visitor;
-use super::symbol_table::{Entry,
-                          VarEntry,
-                          ArrayEntry,
-                          MethodEntry,
-                          ImportEntry,
-                          Table,
-                          Type,
-                          SymbolTable
-                        };
+use super::super::parser::AST;
+use super::symbol_table::{
+    ArrayEntry, Entry, ImportEntry, MethodEntry, SymbolTable, Table, Type, VarEntry,
+};
 
 use core::panic;
 use std::collections::HashMap;
@@ -23,7 +17,7 @@ pub struct Interpreter {
     // func parameters + flags
     checking_type: bool, // whether we are checking the type of a variable, used during field declarations
     init_method: bool, // whether we are initializing a method, this is so we don't create two scopes when we do visit method_decl and then visit_block
-    init_type: Type, // type of varaible being initialized
+    init_type: Type,   // type of varaible being initialized
     in_loop: u32, // we use ints here instead of bool flags since if we have layered loops or expressions we don't want to set this to false once we finish an inner loop/expression
     in_expr: u32,
     in_location: bool,
@@ -56,7 +50,10 @@ impl Interpreter {
             };
         }
 
-        self.push_error(&format!("Error: Identifier {} is used before it is declared.", var_name));
+        self.push_error(&format!(
+            "Error: Identifier {} is used before it is declared.",
+            var_name
+        ));
         return Err(());
     }
 
@@ -64,7 +61,10 @@ impl Interpreter {
         // Rule 1: No identifier is declared twice in the same scope
         let cur_scope = self.scopes[self.cur_scope_ind].as_ref();
         if cur_scope.entries.contains_key(var_name) {
-            self.push_error(&format!("Error: Identifier {} is declared twice in the same scope.", var_name));
+            self.push_error(&format!(
+                "Error: Identifier {} is declared twice in the same scope.",
+                var_name
+            ));
             return true;
         }
         return false;
@@ -91,10 +91,7 @@ impl Interpreter {
     }
 
     fn extract_method_arg_var(&mut self, arg: &AST::MethodArgDecl) -> VarEntry {
-        let arg_name = arg.name
-                            .as_ref()
-                            .name
-                            .as_str();
+        let arg_name = arg.name.as_ref().name.as_str();
         let arg_type = self.string_to_type(arg.type_name.as_str());
         let var_entry = VarEntry {
             name: arg_name.to_string(),
@@ -157,10 +154,8 @@ impl Visitor for Interpreter {
         }
     }
 
-    fn visit_import_decl(&mut self, import_decl: &AST::ImportDecl) { 
-        let import_id = import_decl.import_id
-                                        .name
-                                        .clone();
+    fn visit_import_decl(&mut self, import_decl: &AST::ImportDecl) {
+        let import_id = import_decl.import_id.name.clone();
         // Rule 1: No identifier is declared twice in the same scope
         if self.check_declared(import_id.as_str()) {
             return;
@@ -172,7 +167,8 @@ impl Visitor for Interpreter {
             scope: self.cur_scope_ind,
             id: self.incr_var_count(),
         };
-        self.vars.push(Box::new(Entry::Import(import_entry.clone())));
+        self.vars
+            .push(Box::new(Entry::Import(import_entry.clone())));
         self.write_to_table(import_id.as_str(), Entry::Import(import_entry));
     }
 
@@ -189,9 +185,7 @@ impl Visitor for Interpreter {
         self.visit_identifier(&method_decl.name);
 
         let method_type = self.string_to_type(method_decl.type_name.as_str());
-        let method_name_str = method_decl.name
-                                            .name
-                                            .as_str();
+        let method_name_str = method_decl.name.name.as_str();
         // write function to global scope
         let mut method_entry = MethodEntry {
             name: method_name_str.to_string(),
@@ -204,13 +198,15 @@ impl Visitor for Interpreter {
         };
 
         for arg in &method_decl.args {
-            method_entry.param_list.push(self.extract_method_arg_var(arg.as_ref()));
+            method_entry
+                .param_list
+                .push(self.extract_method_arg_var(arg.as_ref()));
         }
         method_entry.id = self.incr_var_count();
-        self.vars.push(Box::new(Entry::Method(method_entry.clone())));
+        self.vars
+            .push(Box::new(Entry::Method(method_entry.clone())));
 
         self.write_to_table(method_decl.name.name.as_str(), Entry::Method(method_entry));
-        
 
         // create new scope
         let method_table = Table {
@@ -223,10 +219,12 @@ impl Visitor for Interpreter {
 
         self.scopes.push(Box::new(method_table));
 
-        // add children to parent 
+        // add children to parent
         self.cur_scope_ind = self.scopes.len() - 1;
         let parent_ind = self.scopes[self.cur_scope_ind].parent_ind.unwrap();
-        self.scopes[parent_ind].children_inds.push(self.cur_scope_ind);
+        self.scopes[parent_ind]
+            .children_inds
+            .push(self.cur_scope_ind);
 
         // add method args to scope
         for arg in &method_decl.args {
@@ -250,7 +248,9 @@ impl Visitor for Interpreter {
             // add children to parent inds childs array
             self.cur_scope_ind = self.scopes.len() - 1;
             let parent_ind = self.scopes[self.cur_scope_ind].parent_ind.unwrap();
-            self.scopes[parent_ind].children_inds.push(self.cur_scope_ind);
+            self.scopes[parent_ind]
+                .children_inds
+                .push(self.cur_scope_ind);
         }
         self.init_method = false;
 
@@ -267,17 +267,17 @@ impl Visitor for Interpreter {
 
     fn visit_var_decl(&mut self, var_decl: &AST::VarDecl) {
         self.init_type = self.string_to_type(var_decl.type_name.as_str());
-        let var_name = var_decl.name
-                                    .as_ref()
-                                    .name
-                                    .as_str();
+        let var_name = var_decl.name.as_ref().name.as_str();
 
         // Rule 1: No identifier is declared twice in the same scope
         self.visit_identifier(var_decl.name.as_ref());
-        
+
         // Rule 22: Declarations of const locations must have an initializer
         if var_decl.is_const && var_decl.initializer.as_ref().is_none() {
-            self.push_error(&format!("Error: Const location {} must have an initializer.", var_decl.name.as_ref().name));
+            self.push_error(&format!(
+                "Error: Const location {} must have an initializer.",
+                var_decl.name.as_ref().name
+            ));
             return;
         }
 
@@ -286,14 +286,13 @@ impl Visitor for Interpreter {
                 self.visit_int_constant(array_len_node);
                 // Rule 6: If present, the ⟨int literal⟩ in an array declaration must be greater than 0.
                 if array_len_node.value.parse::<i64>().unwrap() <= 0 {
-                    self.push_error(&format!("Error: Array initializer length must be greater than 0."));
+                    self.push_error(&format!(
+                        "Error: Array initializer length must be greater than 0."
+                    ));
                 }
                 // Rule 5: Array initializers have either a declared length or an initializer list, but not both.
                 // TODO: check if it's supposed to be .as_ref().as_ref() or only one .as_ref()
-                if var_decl.initializer
-                        .as_ref()
-                        .as_ref()
-                        .is_some() {
+                if var_decl.initializer.as_ref().as_ref().is_some() {
                     self.push_error(&format!("Error: Array initializers have either a declared length or an initializer list, but not both."));
                 }
             } else {
@@ -302,18 +301,15 @@ impl Visitor for Interpreter {
                     self.push_error(&format!("Error: Array initializers have either a declared length or an initializer list, but not both."));
                 }
 
-                match var_decl.initializer
-                            .as_ref()
-                            .as_ref()
-                            .unwrap() {
+                match var_decl.initializer.as_ref().as_ref().unwrap() {
                     AST::ASTNode::ArrayLiteral(array_literal) => {
                         self.visit_array_literal(array_literal);
-                    },
+                    }
                     _ => {
                         self.push_error(&format!("Error: expected an array list as initializer for variable of type array."));
                     }
                 }
-            } 
+            }
             // add to symbol table
             let array_type = match self.init_type {
                 Type::Int => Type::IntArray,
@@ -329,17 +325,12 @@ impl Visitor for Interpreter {
                 is_const: var_decl.is_const,
                 scope: self.cur_scope_ind,
                 id: var_id,
-            }; 
+            };
             self.vars.push(Box::new(Entry::Array(array_entry.clone())));
             self.write_to_table(var_name, Entry::Array(array_entry));
-        } 
-        
-        else {
+        } else {
             if var_decl.initializer.as_ref().as_ref().is_some() {
-                self.visit_literal(var_decl.initializer
-                                        .as_ref()
-                                        .as_ref()
-                                        .unwrap());
+                self.visit_literal(var_decl.initializer.as_ref().as_ref().unwrap());
             }
 
             let var_id = self.incr_var_count();
@@ -360,14 +351,12 @@ impl Visitor for Interpreter {
         self.visit_identifier(method_arg_decl.name.as_ref());
 
         let method_entry = self.extract_method_arg_var(method_arg_decl);
-        let arg_name = method_arg_decl.name.as_ref()
-                                                .name
-                                                .as_str();
+        let arg_name = method_arg_decl.name.as_ref().name.as_str();
         self.write_to_table(arg_name, Entry::Var(method_entry));
     }
 
     fn visit_if_statement(&mut self, if_statement: &AST::IfStatement) {
-        // Rule 16: The ⟨expr⟩ in an if or while statement must have type bool , as well as the second ⟨expr⟩ of a for statement.   
+        // Rule 16: The ⟨expr⟩ in an if or while statement must have type bool , as well as the second ⟨expr⟩ of a for statement.
         self.visit_expression(if_statement.condition.as_ref());
         if self.result_expr_type != Type::Bool {
             self.push_error("Error: The expression in an if statement must have type bool.");
@@ -388,16 +377,18 @@ impl Visitor for Interpreter {
         // Rule 16: The ⟨expr⟩ in an if or while statement must have type bool , as well as the second ⟨expr⟩ of a for statement.
         self.visit_expression(&for_statement.end_expr);
         if self.result_expr_type != Type::Bool {
-            self.push_error("Error: The ending condition expression in a for statement must have type bool.");
+            self.push_error(
+                "Error: The ending condition expression in a for statement must have type bool.",
+            );
         }
         // Visit update expression to check validity
         match for_statement.update_expr.as_ref() {
             AST::ASTNode::MethodCall(method_call) => {
                 self.visit_method_call(method_call);
-            },
+            }
             AST::ASTNode::Assignment(assignment) => {
                 self.visit_assignment(assignment);
-            },
+            }
             _ => self.push_error("Error: invalid update expression in for statement."),
         }
 
@@ -418,7 +409,6 @@ impl Visitor for Interpreter {
     }
 
     fn visit_return_statement(&mut self, return_statement: &AST::ReturnStatement) {
-        
         // Rule 10: A return statement must not have a return value unless it appears in the body of a method that is declared to return a value
         if self.cur_scope_ind == 0 {
             self.push_error("Error: A return statement must appear in a method body definition, not the global scope.");
@@ -433,16 +423,13 @@ impl Visitor for Interpreter {
             if return_statement.expr.is_none() {
                 self.push_error("Error: A return statement must have a return expression in the body of a method that is declared to return a value.");
             } else {
-                self.visit_expression(return_statement.expr
-                                                    .as_ref()
-                                                    .as_ref()
-                                                    .unwrap());
+                self.visit_expression(return_statement.expr.as_ref().as_ref().unwrap());
                 // Rule 11: The expression in a return statement must have the same type as the declared result type of the enclosing method definition.
                 if self.result_expr_type != method_return_type {
                     self.push_error(&format!("Error: The expression in a return statement must have the same type as the declared result type of the enclosing method definition."));
                 }
             }
-        }        
+        }
     }
 
     fn visit_statement_control(&mut self, _statement_control: &AST::StatementControl) {
@@ -457,13 +444,13 @@ impl Visitor for Interpreter {
         self.visit_location(assignment.assign_var.as_ref());
         let lhs_type = self.result_expr_type.clone();
         if assignment.expr.is_some() {
-            let rhs_expr = assignment.expr.as_ref()
-                                                    .as_ref()
-                                                    .unwrap();
+            let rhs_expr = assignment.expr.as_ref().as_ref().unwrap();
             self.visit_expression(rhs_expr);
             let rhs_type = self.result_expr_type.clone();
             if lhs_type != rhs_type {
-                self.push_error(&format!("Error: The location and expression in an assignment must have the same type."));
+                self.push_error(&format!(
+                    "Error: The location and expression in an assignment must have the same type."
+                ));
             }
 
             // Rule 21: The⟨location⟩ and the ⟨expr⟩ in a compound assignment,⟨location⟩+=⟨expr⟩,⟨location⟩-=⟨expr⟩, ⟨location⟩ *= ⟨expr⟩, ⟨location⟩ /= ⟨expr⟩, and ⟨location⟩ %= ⟨expr⟩, must be of type int . The same is true of the ⟨location⟩ in ++ and -- statements.
@@ -473,7 +460,7 @@ impl Visitor for Interpreter {
                     if ![Type::Int, Type::Long].contains(&lhs_type) {
                         self.push_error(&format!("Error: The location and expression in an assignment must have type int or long in compound expression {}.", assignment.assign_op.as_str()));
                     }
-                },
+                }
                 _ => self.push_error(&format!("Error: invalid assignment operator found.")),
             }
         } else {
@@ -490,7 +477,7 @@ impl Visitor for Interpreter {
         match self.find_var(method_name) {
             Ok(result_entry) => {
                 match result_entry {
-                    Entry::Method(method_entry) => { 
+                    Entry::Method(method_entry) => {
                         // Rule 8: If a method call is used as an expression, the method must return a result.
                         if self.in_expr > 0 {
                             if self.result_expr_type == Type::Void {
@@ -502,7 +489,7 @@ impl Visitor for Interpreter {
                             self.push_error(&format!("Error: Method call to {} has incorrect number of parameters as: expected {} but got {}", method_name, method_entry.param_count, method_call.args.len()));
                             return;
                         }
-                        
+
                         // Rule 7: The number and types of parameters in a method call (non-import) must be the same as the number and types of the declared parameters for the method.
                         // Rule 9: String literals and array variables may not be used as parameters to non-import methods.
                         for (i, arg_expr) in method_call.args.iter().enumerate() {
@@ -511,38 +498,42 @@ impl Visitor for Interpreter {
                             if self.result_expr_type != expected_type {
                                 self.push_error(&format!("Error: expected parameter {} in method call {} to have type {:?} but found type {:?}", i, method_name, expected_type, self.result_expr_type));
                             }
-                            if [Type::IntArray, Type::LongArray, Type::BoolArray].contains(&self.result_expr_type) {
+                            if [Type::IntArray, Type::LongArray, Type::BoolArray]
+                                .contains(&self.result_expr_type)
+                            {
                                 self.push_error(&format!("Error: Array variables may not be used as parameters to non-import methods."));
                             }
                         }
                         self.result_expr_type = method_entry.return_type;
-
-                    },
+                    }
                     Entry::Import(_) => {
                         for arg_expr in method_call.args.iter() {
                             self.visit_expression(arg_expr.as_ref());
                         }
                         self.result_expr_type = Type::Int;
-                    },
-                    _ => self.push_error(&format!("Error: Identifier {} is not a declared method or import.", method_name)),
+                    }
+                    _ => self.push_error(&format!(
+                        "Error: Identifier {} is not a declared method or import.",
+                        method_name
+                    )),
                 }
-            },
+            }
             Err(()) => {
                 self.result_expr_type = Type::None;
                 return;
-            },
-        } 
+            }
+        }
     }
 
     fn visit_len_call(&mut self, len_call: &AST::LenCall) {
         let var_name = len_call.id.name.as_str();
         // Rule 15: The argument of the len operator must be an array variable.
         match self.find_var(var_name) {
-            Ok(id_entry) => {
-                match id_entry {
-                    Entry::Array(_) => (),
-                    _ => self.push_error(&format!("Error: Argument of len operator must be an array variable.")),
-                }
+            Ok(id_entry) => match id_entry {
+                Entry::Array(_) => (),
+                _ => self.push_error(&format!(
+                    "Error: Argument of len operator must be an array variable."
+                )),
             },
             Err(()) => (),
         }
@@ -575,16 +566,21 @@ impl Visitor for Interpreter {
                     self.push_error("Error: The operand of logical not ( ! ) must have type bool.");
                 }
                 self.result_expr_type = Type::Bool;
-            },
+            }
             "-" => {
                 self.visit_expression(unary_expression.expr.as_ref());
                 if ![Type::Int, Type::Long].contains(&self.result_expr_type) {
-                    self.push_error("Error: The operand of unary minus must have type int or long.");
+                    self.push_error(
+                        "Error: The operand of unary minus must have type int or long.",
+                    );
                 }
                 self.result_expr_type = self.result_expr_type.clone();
-            },
+            }
             _ => {
-                self.push_error(&format!("Error: invalid unary operator {} found.", unary_expression.op));
+                self.push_error(&format!(
+                    "Error: invalid unary operator {} found.",
+                    unary_expression.op
+                ));
                 self.result_expr_type = Type::None;
             }
         }
@@ -607,7 +603,7 @@ impl Visitor for Interpreter {
                     self.push_error(&format!("Error: The type of the operands of the arithmetic operator {} must be the same.", binary_expression.op));
                 }
                 self.result_expr_type = left_type.clone();
-            },
+            }
             "<" | "<=" | ">" | ">=" => {
                 if ![Type::Int, Type::Long].contains(&left_type) {
                     self.push_error(&format!("Error: The operands of the comparison operator {} must have type int or long.", binary_expression.op));
@@ -616,21 +612,30 @@ impl Visitor for Interpreter {
                     self.push_error(&format!("Error: The type of the operands of the comparison operator {} must be the same.", binary_expression.op));
                 }
                 self.result_expr_type = Type::Bool;
-            },
+            }
             "==" | "!=" => {
                 if left_type != right_type {
-                    self.push_error(&format!("Error: The operands of the equality operator {} must have the same type.", binary_expression.op));
+                    self.push_error(&format!(
+                        "Error: The operands of the equality operator {} must have the same type.",
+                        binary_expression.op
+                    ));
                 }
                 self.result_expr_type = Type::Bool;
-            },
+            }
             "&&" | "||" => {
                 if left_type != Type::Bool || right_type != Type::Bool {
-                    self.push_error(&format!("Error: The operands of the conditional operator {} must have type bool.", binary_expression.op));
+                    self.push_error(&format!(
+                        "Error: The operands of the conditional operator {} must have type bool.",
+                        binary_expression.op
+                    ));
                 }
                 self.result_expr_type = Type::Bool;
-            },
+            }
             _ => {
-                self.push_error(&format!("Error: invalid binary operator {} found.", binary_expression.op));
+                self.push_error(&format!(
+                    "Error: invalid binary operator {} found.",
+                    binary_expression.op
+                ));
                 self.result_expr_type = Type::None;
             }
         }
@@ -644,7 +649,10 @@ impl Visitor for Interpreter {
                     self.visit_identifier(index_expression.id.as_ref());
                     self.visit_expression(index_expression.idx_expr.as_ref());
                     if self.result_expr_type != Type::Int {
-                        self.push_error(&format!("Error: Index expression for array access to {} must have type int.", index_expression.id.name.as_str()));
+                        self.push_error(&format!(
+                            "Error: Index expression for array access to {} must have type int.",
+                            index_expression.id.name.as_str()
+                        ));
                     }
                     match array_entry.get_type() {
                         Type::IntArray => self.result_expr_type = Type::Int,
@@ -652,8 +660,11 @@ impl Visitor for Interpreter {
                         Type::BoolArray => self.result_expr_type = Type::Bool,
                         _ => self.result_expr_type = Type::None,
                     }
-                },
-                _ => self.push_error(&format!("Error: Identifier {} must be an array variable.", index_expression.id.name.as_str())),
+                }
+                _ => self.push_error(&format!(
+                    "Error: Identifier {} must be an array variable.",
+                    index_expression.id.name.as_str()
+                )),
             }
         } else {
             self.result_expr_type = Type::None;
@@ -665,46 +676,46 @@ impl Visitor for Interpreter {
         match expression {
             AST::ASTNode::UnaryExpression(unary_expression) => {
                 self.visit_unary_expression(unary_expression);
-            },
+            }
             AST::ASTNode::BinaryExpression(binary_expression) => {
                 self.visit_binary_expression(binary_expression);
-            },
+            }
             AST::ASTNode::LenCall(len_call) => {
                 self.visit_len_call(len_call);
-            },
+            }
             AST::ASTNode::IntCast(int_cast) => {
                 self.visit_int_cast(int_cast);
-            },
+            }
             AST::ASTNode::LongCast(long_cast) => {
                 self.visit_long_cast(long_cast);
-            },
+            }
             AST::ASTNode::MethodCall(method_call) => {
                 self.visit_method_call(method_call);
-            },
+            }
             AST::ASTNode::IndexExpression(index_expression) => {
                 self.visit_index_expression(index_expression);
-            },
+            }
             AST::ASTNode::Identifier(identifier) => {
                 self.visit_identifier(identifier);
-            },
+            }
             AST::ASTNode::IntConstant(int_constant) => {
                 self.visit_int_constant(int_constant);
-            },
+            }
             AST::ASTNode::LongConstant(long_constant) => {
                 self.visit_long_constant(long_constant);
-            },
+            }
             AST::ASTNode::BoolConstant(bool_constant) => {
                 self.visit_bool_constant(bool_constant);
-            },
+            }
             AST::ASTNode::CharConstant(char_constant) => {
                 self.visit_char_constant(char_constant);
-            },
+            }
             AST::ASTNode::StringConstant(str_constant) => {
                 self.visit_string_constant(str_constant);
             }
             _ => {
                 self.push_error("Error: invalid expression type found (check grammar).");
-            },
+            }
         }
         self.in_expr -= 1;
     }
@@ -721,19 +732,19 @@ impl Visitor for Interpreter {
         match literal {
             AST::ASTNode::IntConstant(int_constant) => {
                 self.visit_int_constant(int_constant);
-            },
+            }
             AST::ASTNode::LongConstant(long_constant) => {
                 self.visit_long_constant(long_constant);
-            },
+            }
             AST::ASTNode::BoolConstant(bool_constant) => {
                 self.visit_bool_constant(bool_constant);
-            },
+            }
             AST::ASTNode::CharConstant(char_constant) => {
                 self.visit_char_constant(char_constant);
-            },
+            }
             _ => {
                 self.push_error("Error: invalid type for literal - expected either int or bool.");
-            },
+            }
         }
         self.checking_type = false;
     }
@@ -744,16 +755,16 @@ impl Visitor for Interpreter {
             AST::ASTNode::Identifier(identifier) => {
                 // Rule 10: An <id> used as a <location> must name a declared local/global variable or formal parameter.
                 self.visit_identifier(identifier);
-            },
+            }
             AST::ASTNode::IndexExpression(index_expression) => {
                 // Rule 10: An <id> used as a <location> must name a declared local/global variable or formal parameter.
 
                 self.visit_index_expression(index_expression);
-            },
+            }
             _ => {
                 self.push_error("Error: invalid location type found (check grammar).");
                 self.result_expr_type = Type::None;
-            },
+            }
         }
         self.in_location = false;
     }
@@ -765,19 +776,19 @@ impl Visitor for Interpreter {
             0 => {
                 // Rule 1: No identifier is declared twice in the same scope
                 self.check_declared(id_name);
-            },
+            }
             // read variable
             1 => {
                 // Rule 2: No identifier is used before it is declared
                 match self.find_var(id_name) {
                     Ok(id_entry) => {
                         self.result_expr_type = id_entry.get_type();
-                    },
+                    }
                     Err(()) => {
                         self.result_expr_type = Type::None;
                     }
                 }
-            },
+            }
             // write variable
             2 => {
                 // Rule 2: No identifier is used before it is declared
@@ -793,21 +804,24 @@ impl Visitor for Interpreter {
                             match id_entry {
                                 Entry::Method(_) => {
                                     self.push_error(&format!("Error: Id {} used as a location must have a declared local/global variable or formal parameter", id_name));
-                                },
+                                }
                                 Entry::Import(_) => {
                                     self.push_error(&format!("Error: Id {} used as a location must have a declared local/global variable or formal parameter", id_name));
-                                },
+                                }
                                 _ => (),
                             }
                         }
-                    },
+                    }
                     Err(()) => {
                         self.result_expr_type = Type::None;
-                    },
+                    }
                 }
-            },
+            }
             _ => {
-                self.push_error(&format!("Error: Identifier status {} is invalid: not one of 0, 1, 2.", identifier.status));
+                self.push_error(&format!(
+                    "Error: Identifier status {} is invalid: not one of 0, 1, 2.",
+                    identifier.status
+                ));
                 self.result_expr_type = Type::None;
             }
         }
@@ -826,7 +840,10 @@ impl Visitor for Interpreter {
             match i32::from_str_radix(int_constant_str.as_str(), 16) {
                 Ok(_) => (),
                 Err(_) => {
-                    self.push_error(&format!("Error: Integer literal {} is out of 32 bit range.", int_constant.value));
+                    self.push_error(&format!(
+                        "Error: Integer literal {} is out of 32 bit range.",
+                        int_constant.value
+                    ));
                 }
             }
         } else {
@@ -837,13 +854,19 @@ impl Visitor for Interpreter {
             match int_constant_str.as_str().parse::<i32>() {
                 Ok(_) => (),
                 Err(_) => {
-                    self.push_error(&format!("Error: Integer literal {} is out of 32 bit range.", int_constant.value));
+                    self.push_error(&format!(
+                        "Error: Integer literal {} is out of 32 bit range.",
+                        int_constant.value
+                    ));
                 }
             }
         }
         if self.checking_type {
             if self.init_type != Type::Int {
-                self.push_error(&format!("Error: expected {:?} as type for initializer variable not int", self.init_type));
+                self.push_error(&format!(
+                    "Error: expected {:?} as type for initializer variable not int",
+                    self.init_type
+                ));
                 self.result_expr_type = self.init_type.clone();
                 return;
             }
@@ -862,7 +885,10 @@ impl Visitor for Interpreter {
             match i64::from_str_radix(long_constant_str.as_str(), 16) {
                 Ok(_) => (),
                 Err(_) => {
-                    self.push_error(&format!("Error: Long literal {} is out of 64 bit range.", long_constant.value));
+                    self.push_error(&format!(
+                        "Error: Long literal {} is out of 64 bit range.",
+                        long_constant.value
+                    ));
                 }
             }
         } else {
@@ -873,24 +899,33 @@ impl Visitor for Interpreter {
             match long_constant_str.as_str().parse::<i64>() {
                 Ok(_) => (),
                 Err(_) => {
-                    self.push_error(&format!("Error: Integer literal {} is out of 64 bit range.", long_constant.value));
+                    self.push_error(&format!(
+                        "Error: Integer literal {} is out of 64 bit range.",
+                        long_constant.value
+                    ));
                 }
             }
         }
         if self.checking_type {
             if self.init_type != Type::Long {
-                self.push_error(&format!("Error: expected {:?} as type for initializer variable not long", self.init_type));
+                self.push_error(&format!(
+                    "Error: expected {:?} as type for initializer variable not long",
+                    self.init_type
+                ));
                 self.result_expr_type = self.init_type.clone();
                 return;
             }
-        } 
+        }
         self.result_expr_type = Type::Long;
     }
 
     fn visit_bool_constant(&mut self, _bool_constant: &AST::BoolConstant) {
         if self.checking_type {
             if self.init_type != Type::Bool {
-                self.push_error(&format!("Error: expected {:?} as type for initializer variable not bool", self.init_type));
+                self.push_error(&format!(
+                    "Error: expected {:?} as type for initializer variable not bool",
+                    self.init_type
+                ));
                 self.result_expr_type = self.init_type.clone();
                 return;
             }
@@ -901,7 +936,10 @@ impl Visitor for Interpreter {
     fn visit_char_constant(&mut self, _char_constant: &AST::CharConstant) {
         if self.checking_type {
             if self.init_type != Type::Int {
-                self.push_error(&format!("Error: expected {:?} as type for initializer variable not int", self.init_type));
+                self.push_error(&format!(
+                    "Error: expected {:?} as type for initializer variable not int",
+                    self.init_type
+                ));
                 self.result_expr_type = self.init_type.clone();
                 return;
             }

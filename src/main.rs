@@ -1,12 +1,13 @@
-mod utils;
-mod scanner;
+mod cfg;
 mod parser;
+mod scanner;
 mod semantics;
+mod utils;
 
 fn get_writer(output: &Option<std::path::PathBuf>) -> Box<dyn std::io::Write> {
     match output {
         Some(path) => Box::new(std::fs::File::create(path.as_path()).unwrap()),
-        None => Box::new(std::io::stdout())
+        None => Box::new(std::io::stdout()),
     }
 }
 
@@ -36,7 +37,6 @@ fn main() {
         utils::cli::CompilerAction::Inter => {
             semantics::semantics::interpret(&args.input, writer, args.debug);
         }
-        utils::cli::CompilerAction::Assembly => {
-        }
+        utils::cli::CompilerAction::Assembly => {}
     }
 }

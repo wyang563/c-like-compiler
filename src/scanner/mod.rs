@@ -1,2 +1,2 @@
-pub mod scanner;
 pub mod constants;
+pub mod scanner;

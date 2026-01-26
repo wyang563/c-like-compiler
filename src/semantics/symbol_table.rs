@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Entry {
     Var(VarEntry),
     Array(ArrayEntry),
@@ -29,9 +28,7 @@ impl Entry {
     }
 }
 
-#[derive(Clone)]
-#[derive(PartialEq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Type {
     Void,
     Int,
@@ -43,8 +40,7 @@ pub enum Type {
     None, // default value for error propogation
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VarEntry {
     pub name: String,
     pub var_type: Type,
@@ -53,18 +49,16 @@ pub struct VarEntry {
     pub id: usize,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ArrayEntry {
     pub name: String,
     pub var_type: Type,
     pub is_const: bool,
-    pub scope: usize, 
+    pub scope: usize,
     pub id: usize,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MethodEntry {
     pub name: String,
     pub return_type: Type,
@@ -75,8 +69,7 @@ pub struct MethodEntry {
     pub id: usize,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ImportEntry {
     pub name: String,
     pub is_const: bool,
@@ -85,8 +78,7 @@ pub struct ImportEntry {
     pub id: usize,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Table {
     pub method_return_type: Type,
     pub entries: HashMap<String, Entry>,
