@@ -27,15 +27,6 @@ impl Entry {
             Entry::Import(_) => Type::Int,
         }
     }
-
-    pub fn get_id(&self) -> usize {
-        match self {
-            Entry::Var(v) => v.id,
-            Entry::Array(a) => a.id,
-            Entry::Method(m) => m.id,
-            Entry::Import(i) => i.id,
-        }
-    }
 }
 
 #[derive(Clone)]
