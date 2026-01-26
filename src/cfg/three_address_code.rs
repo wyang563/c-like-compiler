@@ -73,11 +73,16 @@ pub struct ValueInfo {
 
 #[derive(Clone, Debug)]
 pub struct BasicBlock {
+    // id of this block inside function
     pub id: BlockId,
+    // string label for debugging
     pub label: Option<String>, 
+    // join blocks to determine mem_in value
+    pub mem_in: Option<Phi>,
+    // value phis only (non-mem variables)
     pub phis: Vec<Phi>,
     pub instrs: Vec<Instr>,
-    pub term: Option<Terminator>,
+    pub term: Terminator,
 }
 
 #[derive(Clone, Debug)]
@@ -203,9 +208,9 @@ pub enum CastKind {
 
 #[derive(Clone, Debug)]
 pub enum Terminator {
-    Br { target: BlockId },
-    CBr { cond: ValueId, then_bb: BlockId, else_bb: BlockId },
-    RetVoid,
-    Ret { value: ValueId },
+    Br  { mem: ValueId, target: BlockId },
+    CBr { mem: ValueId, cond: ValueId, then_bb: BlockId, else_bb: BlockId },
+    RetVoid { mem: ValueId },
+    Ret { mem: ValueId, value: ValueId },
     Unreachable,
 }
