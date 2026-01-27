@@ -1,13 +1,27 @@
 use super::super::parser::visitor::{Visitor};
 use super::super::parser::AST;
-use std::collections::HashMap;
+use super::three_address_code::{ProgramIR, GlobalDecl};
+use std::collections::HashSet;
 
-pub struct SSA_CFG {
+pub struct SSA_CFG_Compiler {
+    // final output IR
+    program_ir: ProgramIR,
 
+    // set of global vars used during compilation
+    globals_map: HashSet<String>,
+
+    // tracking state (globally)
+    cur_value_id: u32,
+    cur_block_id: u32,
+
+    // tracking state (per function)
+    cur_mem_id: u32,
 }
 
-impl Visitor for SSA_CFG {
-    fn visit_program(&mut self, _program: &AST::Program) {}
+impl Visitor for SSA_CFG_Compiler {
+    fn visit_program(&mut self, _program: &AST::Program) {
+
+    }
 
     fn visit_import_decl(&mut self, _import_decl: &AST::ImportDecl) {}
     
@@ -68,10 +82,17 @@ impl Visitor for SSA_CFG {
     fn visit_char_constant(&mut self, _char_constant: &AST::CharConstant) {}   
 }
 
-pub fn compile_to_ssa_cfg(ast: AST::Program) -> SSA_CFG {
-    let mut cfg = SSA_CFG {
-
+pub fn compile_to_ssa_cfg(ast: AST::Program) -> ProgramIR {
+    let mut ssa_cfg_compiler = SSA_CFG_Compiler {
+        program_ir: ProgramIR {
+            globals: vec![],
+            functions: std::collections::HashMap::new(), 
+        },
+        globals_map: HashSet::new(),
+        cur_value_id: 0,
+        cur_block_id: 0,
+        cur_mem_id: 0,
     };
-
-    cfg
+    ssa_cfg_compiler.visit_program(&ast);
+    return ssa_cfg_compiler.program_ir;
 }

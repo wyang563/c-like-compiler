@@ -1,6 +1,6 @@
 use super::super::semantics::semantics::interpret_file;
 use super::super::parser::parser::parse_file;
-use super::super::cfg::ssa_cfg::compile_to_ssa_cfg;
+use super::super::cfg::ssa_cfg_compiler::compile_to_ssa_cfg;
 
 pub fn assemble(input: &std::path::PathBuf, mut writer: Box<dyn std::io::Write>, debug: bool) {
     match parse_file(input) {

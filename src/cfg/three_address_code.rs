@@ -1,5 +1,7 @@
 // TAC instruction definitions
 
+use std::collections::HashMap;
+
 // IDs
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ValueId(pub u32);
@@ -38,7 +40,7 @@ impl From<&str> for Symbol {
 #[derive(Clone, Debug)]
 pub struct ProgramIR {
     pub globals: Vec<GlobalDecl>,
-    pub functions: Vec<FunctionIR>,
+    pub functions: HashMap<String, FunctionIR>
 }
 
 #[derive(Clone, Debug)]
@@ -60,8 +62,9 @@ pub struct FunctionIR {
     pub name: Symbol,
     pub params: Vec<ValueId>,
     pub ret_ty: Type,
-    pub values: Vec<ValueInfo>, // variable information metadata
+    pub values: HashMap<ValueId, ValueInfo>,
     pub blocks: Vec<BasicBlock>,
+    pub blocks_map: HashMap<BlockId, Vec<BlockId>>,
     pub entry: BlockId,
 }
 
