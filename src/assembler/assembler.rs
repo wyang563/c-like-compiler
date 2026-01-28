@@ -6,9 +6,9 @@ pub fn assemble(input: &std::path::PathBuf, mut writer: Box<dyn std::io::Write>,
     match parse_file(input) {
         Ok(ast) => {
             match interpret_file(input, debug) {
-                Ok(_) => {
+                Ok(symbol_table) => {
                     // create SSA form CFG
-                    let ssa_cfg = compile_to_ssa_cfg(ast);
+                    let ssa_cfg = compile_to_ssa_cfg(ast, symbol_table);
                 }
                 Err(e) => {
                     writeln!(writer, "Error in semantic analysis of file with the following errors reported: \n {:?}", e).unwrap();
