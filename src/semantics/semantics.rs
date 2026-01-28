@@ -285,13 +285,12 @@ impl Visitor for Interpreter {
             if let Some(array_len_node) = var_decl.array_len.as_ref() {
                 self.visit_int_constant(array_len_node);
                 // Rule 6: If present, the ⟨int literal⟩ in an array declaration must be greater than 0.
-                if array_len_node.value.parse::<i64>().unwrap() <= 0 {
+                if array_len_node.value.parse::<i32>().unwrap() <= 0 {
                     self.push_error(&format!(
                         "Error: Array initializer length must be greater than 0."
                     ));
                 }
                 // Rule 5: Array initializers have either a declared length or an initializer list, but not both.
-                // TODO: check if it's supposed to be .as_ref().as_ref() or only one .as_ref()
                 if var_decl.initializer.as_ref().as_ref().is_some() {
                     self.push_error(&format!("Error: Array initializers have either a declared length or an initializer list, but not both."));
                 }

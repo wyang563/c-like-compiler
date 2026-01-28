@@ -18,12 +18,7 @@ pub enum Type {
     Ptr(Box<Type>),
     Mem,
     Void,
-}
-
-impl Type {
-    pub fn ptr_to(t: Type) -> Type {
-        Type::Ptr(Box::new(t))
-    }
+    None,
 }
 
 // Symbols
