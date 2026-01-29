@@ -9,6 +9,9 @@ pub fn assemble(input: &std::path::PathBuf, mut writer: Box<dyn std::io::Write>,
                 Ok(symbol_table) => {
                     // create SSA form CFG
                     let ssa_cfg = compile_to_ssa_cfg(ast, symbol_table);
+
+                    // dummy print statements for testing
+                    writeln!(writer, "SSA CFG: \n {:#?}", ssa_cfg).unwrap();
                 }
                 Err(e) => {
                     writeln!(writer, "Error in semantic analysis of file with the following errors reported: \n {:?}", e).unwrap();

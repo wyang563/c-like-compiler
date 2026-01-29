@@ -220,6 +220,8 @@ impl Visitor for SSA_CFG_Compiler {
                     panic!();
                 }
             }
+        } else {
+
         }
     }
 
@@ -257,11 +259,37 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_index_expression(&mut self, _index_expression: &AST::IndexExpression) {}
 
-    fn visit_array_literal(&mut self, _array_literal: &AST::ArrayLiteral) {}
+    fn visit_array_literal(&mut self, array_literal: &AST::ArrayLiteral) {
+        let mut literal_values: Vec<ConstValue> = vec![];
+        for literal in &array_literal.array_values {
+            self.visit_literal(literal);
+            literal_values.push(self.get_literal_value());
+        }
+        self.result_array_literal_values = Some(literal_values);
+    }
 
     fn visit_location(&mut self, _location: &AST::ASTNode) {}
 
-    fn visit_literal(&mut self, _literal: &AST::ASTNode) {}
+    fn visit_literal(&mut self, literal: &AST::ASTNode) {
+        match literal {
+            AST::ASTNode::IntConstant(int_constant) => {
+                self.visit_int_constant(int_constant);
+            }
+            AST::ASTNode::LongConstant(long_constant) => {
+                self.visit_long_constant(long_constant);
+            }
+            AST::ASTNode::BoolConstant(bool_constant) => {
+                self.visit_bool_constant(bool_constant);
+            }
+            AST::ASTNode::CharConstant(char_constant) => {
+                self.visit_char_constant(char_constant);
+            }
+            _ => {
+                eprintln!("Error: invalid literal node");
+                panic!();
+            }
+        }
+    }
 
     fn visit_identifier(&mut self, identifier: &AST::Identifier) {
         let id_name = identifier.name.as_str();
@@ -306,15 +334,68 @@ impl Visitor for SSA_CFG_Compiler {
         }
     }
 
-    fn visit_int_constant(&mut self, _int_constant: &AST::IntConstant) {}
+    fn visit_int_constant(&mut self, int_constant: &AST::IntConstant) {
+        let int_value: i32;
+        if int_constant.value.contains("x") {
+            let int_constant_str: String;
+            if int_constant.is_neg {
+                int_constant_str = format!("-{}", &int_constant.value[2..]);
+            } else {
+                int_constant_str = int_constant.value[2..].to_string();
+            }
+            int_value = i32::from_str_radix(int_constant_str.as_str(), 16).unwrap();
+        } else {
+            int_value = int_constant.value.parse::<i32>().unwrap();
+        }
+        self.result_literal_value = Some(ConstValue::I32(int_value));
+    }
 
-    fn visit_long_constant(&mut self, _long_constant: &AST::LongConstant) {}
+    fn visit_long_constant(&mut self, long_constant: &AST::LongConstant) {
+        let long_value: i64;
+        if long_constant.value.contains("x") {
+            let long_constant_str: String;
+            if long_constant.is_neg {
+                long_constant_str = format!("-{}", &long_constant.value[2..]);
+            } else {
+                long_constant_str = long_constant.value[2..].to_string();
+            }
+            long_value = i64::from_str_radix(long_constant_str.as_str(), 16).unwrap();
+        } else {
+            long_value = long_constant.value.parse::<i64>().unwrap();
+        }
+        self.result_literal_value = Some(ConstValue::I64(long_value));
+    }
 
     fn visit_string_constant(&mut self, _string_constant: &AST::StringConstant) {}
 
-    fn visit_bool_constant(&mut self, _bool_constant: &AST::BoolConstant) {}
+    fn visit_bool_constant(&mut self, bool_constant: &AST::BoolConstant) {
+        self.result_literal_value = Some(ConstValue::I1(bool_constant.value));
+    }
 
-    fn visit_char_constant(&mut self, _char_constant: &AST::CharConstant) {}   
+    fn visit_char_constant(&mut self, char_constant: &AST::CharConstant) {
+        let raw = char_constant.value.as_str();
+        let ch = if raw.len() == 1 {
+            raw.chars().next().unwrap()
+        } else if raw.len() == 2 && raw.starts_with('\\') {
+            match raw.chars().nth(1).unwrap() {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '\\' => '\\',
+                '\'' => '\'',
+                '\"' => '\"',
+                other => {
+                    eprintln!("Error: invalid char escape: \\{}", other);
+                    panic!();
+                }
+            }
+        } else {
+            eprintln!("Error: invalid char literal: {}", raw);
+            panic!();
+        };
+
+        self.result_literal_value = Some(ConstValue::I32(ch as i32));
+    }   
 }
 
 pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> ProgramIR {
