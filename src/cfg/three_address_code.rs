@@ -60,13 +60,15 @@ pub struct FunctionIR {
     pub values: HashMap<ValueId, ValueInfo>,
     pub blocks: Vec<BasicBlock>,
     pub blocks_map: HashMap<BlockId, Vec<BlockId>>,
-    pub entry: BlockId,
 }
 
 #[derive(Clone, Debug)]
 pub struct ValueInfo {
     pub ty: Type,
-    pub dbg_name: Option<String>,
+    pub declared_location: Option<InstrLocation>,
+    pub use_chain: Vec<InstrLocation>,
+    pub org_name: String, // original var name in program
+    pub debug_name: String // debug name for debugging
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +97,13 @@ pub struct Phi {
 pub struct Instr {
     pub results: Vec<ValueId>,
     pub kind: InstrKind,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstrLocation {
+    pub func: String, // func name as a string
+    pub bb_ind: usize, // index of basic block in FunctionIR 
+    pub instr_ind: usize // index of instruction in basic block instruction list
 }
 
 #[derive(Clone, Debug)]

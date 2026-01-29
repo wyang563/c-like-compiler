@@ -183,7 +183,7 @@ impl Visitor for Interpreter {
 
         // Rule 1: No identifier is declared twice in the same scope
         self.visit_identifier(&method_decl.name);
-
+// placeholder
         let method_type = self.string_to_type(method_decl.type_name.as_str());
         let method_name_str = method_decl.name.name.as_str();
         // write function to global scope

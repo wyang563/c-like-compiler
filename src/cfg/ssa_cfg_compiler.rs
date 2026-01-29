@@ -1,7 +1,7 @@
 use super::super::parser::visitor::{Visitor};
 use super::super::semantics::symbol_table::{SymbolTable, Entry as SymEntry, Type as SymType};
 use super::super::parser::AST;
-use super::three_address_code::{ProgramIR, Symbol, GlobalDecl, GlobalKind, Type, ConstValue};
+use super::three_address_code::{ProgramIR, FunctionIR, Symbol, GlobalDecl, GlobalKind, Type, ConstValue, ValueId, ValueInfo};
 use std::collections::{HashSet, HashMap};
 
 #[allow(non_camel_case_types)]
@@ -16,20 +16,28 @@ pub struct SSA_CFG_Compiler {
     var_to_value_id: HashMap<usize, HashMap<String, u32>>,
 
     // tracking state (globally)
-    cur_value_id: u32,
-    cur_block_id: u32,
-    cur_mem_id: u32,
+    cur_value_id: u32, // for naming new variables
+    cur_block_id: u32, // for naming new blocks
+    cur_mem_id: u32, // for naming new mem side effect vars
     cur_scope_ind: usize,
     symbol_table: SymbolTable,
     
-    // tracking state (per-scope)
+    // tracking state (per-function or per-scope)
+    cur_func: Option<FunctionIR>, // None if we are in global scope
     cur_child_scope_map: HashMap<usize, usize>, // map from parent scope idx to which child scope idx we're on
+    cur_block_ind: usize,
+
+    // by basic block tracking
+    cur_instr_ind: usize,
 
     // result store variables
     result_var_type: Type,
     result_is_global: Option<bool>, // tracks whether an identifier processed is a global
     result_literal_value: Option<ConstValue>,
-    result_array_literal_values: Option<Vec<ConstValue>>
+    result_array_literal_values: Option<Vec<ConstValue>>,
+
+    // flags
+    init_method: bool
 }
 
 impl SSA_CFG_Compiler {
@@ -61,6 +69,26 @@ impl SSA_CFG_Compiler {
         let array_literal_values = self.result_array_literal_values.clone().unwrap();
         self.result_array_literal_values = None; // reset result array literal values for safety
         return array_literal_values;
+    }
+
+    // scope incr helpers
+    // incrs cur_scope_ind and cur_child_scope_map to reflect 
+    fn next_child_scope(&mut self) {
+        let cur_scope = self.symbol_table.scopes[self.cur_scope_ind].as_ref();
+        let child_scope_ind_in_list = *self
+            .cur_child_scope_map
+            .entry(self.cur_scope_ind)
+            .or_insert(0); // index of children_inds element we are on
+        *self.cur_child_scope_map
+            .get_mut(&self.cur_scope_ind)
+            .expect("missing child-scope counter for parent scope") += 1;
+
+        self.cur_scope_ind = cur_scope.children_inds[child_scope_ind_in_list];
+    }
+
+    fn decrement_to_parent_scope(&mut self) {
+        let cur_scope = self.symbol_table.scopes[self.cur_scope_ind].as_ref();
+        self.cur_scope_ind = cur_scope.parent_ind.unwrap();
     }
 
     // get entry from a given scope index
@@ -136,18 +164,45 @@ impl Visitor for SSA_CFG_Compiler {
         }
     }
 
-    fn visit_method_decl(&mut self, _method_decl: &AST::MethodDecl) {
-        // Search symbol table for method args and record them
+    fn visit_method_decl(&mut self, method_decl: &AST::MethodDecl) {
+        self.init_method = true;
+        self.visit_identifier(&method_decl.name); // bookeeping for method name (idt we actually need to call this)
+        let method_name = method_decl.name.name.clone();
+        let method_type = self.get_result_var_type();
+
         // create new CFG in FunctionIR
-        // create initial basic block
+        let function_ir = FunctionIR {
+            name: Symbol(method_name.clone()),
+            params: vec![],
+            ret_ty: method_type, 
+            values: HashMap::new(),
+            blocks: vec![],
+            blocks_map: HashMap::new(),
+        };
+
+        self.cur_func = Some(function_ir);
+
+        // increment scope and add method args to new scope
+        self.next_child_scope();
+        for method_arg in &method_decl.args {
+            self.visit_method_arg_decl(method_arg);
+        }
+        self.init_method = false;
+
         // visit function block
+        self.visit_block(method_decl.body.as_ref());
+
+        // insert into functions in program IR
+        let func_ir = self.cur_func.take().unwrap();
+        self.program_ir.functions.insert(method_name.clone(), func_ir);
     }
 
     fn visit_block(&mut self, _block: &AST::Block) {
-        // increment scope to next child scope of parent and add next child scope of the given parent to stack
+        // if not init method increment scope to next child scope of parent and add next child scope of the given parent to stack
         // visit all field declarations
         // visit all statements
         // decrement back to parent scope
+        self.decrement_to_parent_scope();
     }
 
     fn visit_var_decl(&mut self, var_decl: &AST::VarDecl) { 
@@ -220,12 +275,14 @@ impl Visitor for SSA_CFG_Compiler {
                     panic!();
                 }
             }
-        } else {
-
-        }
+        } 
+        // NOTE - since I was dumb and didn't realize we can't initialize variables with values we don't need to do 
+        // anything more here for the case of local variable declarations. 
     }
 
-    fn visit_method_arg_decl(&mut self, _method_arg_decl: &AST::MethodArgDecl) {}
+    fn visit_method_arg_decl(&mut self, method_arg_decl: &AST::MethodArgDecl) {
+        self.visit_identifier(method_arg_decl.name.as_ref());
+    }
 
     fn visit_if_statement(&mut self, _if_statement: &AST::IfStatement) {
 
@@ -321,10 +378,30 @@ impl Visitor for SSA_CFG_Compiler {
             0 | 2 => {
                 if !is_global {
                     let new_value_id = self.get_cur_value_id();
+
+                    // if we are initializing a method then push the parameters as value ids
+                    if self.init_method {
+                        self.cur_func.as_mut().unwrap().params.push(ValueId(new_value_id));
+                    }
+
                     self.var_to_value_id
                         .entry(var_scope_ind)
                         .or_insert(HashMap::new())
                         .insert(id_name.to_string(), new_value_id); // placeholder value id
+
+                    // put newly declared variable in FunctionIR values map
+                    let new_value_info = ValueInfo {
+                        ty: self.result_var_type.clone(),
+                        declared_location: None,
+                        use_chain: vec![],
+                        org_name: id_name.to_string(),
+                        debug_name: id_name.to_string()
+                    };
+                    self.cur_func
+                        .as_mut()
+                        .unwrap()
+                        .values
+                        .insert(ValueId(new_value_id), new_value_info);
                 }
             },
             1 => (),
@@ -408,6 +485,9 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
         cur_block_id: 0,
         cur_mem_id: 0,
         cur_scope_ind: 0,
+        cur_func: None,
+        cur_block_ind: 0,
+        cur_instr_ind: 0,
         cur_child_scope_map: HashMap::new(),
         var_to_value_id: HashMap::new(),
         symbol_table: symbol_table,
@@ -416,6 +496,7 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
         result_is_global: None,
         result_literal_value: None,
         result_array_literal_values: None,
+        init_method: false
     };
     ssa_cfg_compiler.visit_program(&ast);
     return ssa_cfg_compiler.program_ir;
