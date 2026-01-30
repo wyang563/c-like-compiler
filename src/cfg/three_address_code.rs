@@ -59,6 +59,7 @@ pub struct FunctionIR {
     pub ret_ty: Type,
     pub values: HashMap<ValueId, ValueInfo>,
     pub blocks: Vec<BasicBlock>,
+    pub block_id_to_ind: HashMap<BlockId, usize>,
     pub blocks_map: HashMap<BlockId, Vec<BlockId>>,
 }
 
@@ -75,8 +76,6 @@ pub struct ValueInfo {
 pub struct BasicBlock {
     // id of this block inside function
     pub id: BlockId,
-    // string label for debugging
-    pub label: Option<String>, 
     // join blocks to determine mem_in value
     pub mem_in: Option<Phi>,
     // value phis only (non-mem variables)

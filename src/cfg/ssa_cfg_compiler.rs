@@ -1,7 +1,7 @@
 use super::super::parser::visitor::{Visitor};
 use super::super::semantics::symbol_table::{SymbolTable, Entry as SymEntry, Type as SymType};
 use super::super::parser::AST;
-use super::three_address_code::{ProgramIR, FunctionIR, Symbol, GlobalDecl, GlobalKind, Type, ConstValue, ValueId, ValueInfo};
+use super::three_address_code::{ProgramIR, FunctionIR, Symbol, GlobalDecl, GlobalKind, Type, ConstValue, ValueId, BlockId, ValueInfo, BasicBlock, Terminator};
 use std::collections::{HashSet, HashMap};
 
 #[allow(non_camel_case_types)]
@@ -16,16 +16,16 @@ pub struct SSA_CFG_Compiler {
     var_to_value_id: HashMap<usize, HashMap<String, u32>>,
 
     // tracking state (globally)
-    cur_value_id: u32, // for naming new variables
-    cur_block_id: u32, // for naming new blocks
-    cur_mem_id: u32, // for naming new mem side effect vars
+    next_value_id: u32, // for creating new vars  
+    next_block_id: u32, // next block id to create
+    next_mem_id: u32, // for naming new mem side effect vars
     cur_scope_ind: usize,
     symbol_table: SymbolTable,
     
     // tracking state (per-function or per-scope)
     cur_func: Option<FunctionIR>, // None if we are in global scope
     cur_child_scope_map: HashMap<usize, usize>, // map from parent scope idx to which child scope idx we're on
-    cur_block_ind: usize,
+    cur_block_ind: usize, // cur block id we are processing 
 
     // by basic block tracking
     cur_instr_ind: usize,
@@ -42,9 +42,19 @@ pub struct SSA_CFG_Compiler {
 
 impl SSA_CFG_Compiler {
     // helpers for getting state
-    fn get_cur_value_id(&mut self) -> u32 {
-        self.cur_value_id += 1;
-        return self.cur_value_id - 1
+    fn get_next_value_id(&mut self) -> u32 {
+        self.next_value_id += 1;
+        return self.next_value_id - 1
+    }
+
+    fn get_next_block_id(&mut self) -> u32 {
+        self.next_block_id += 1;
+        return self.next_block_id - 1;
+    }
+
+    fn get_next_mem_id(&mut self) -> u32 {
+        self.next_mem_id += 1;
+        return self.next_mem_id - 1;
     }
 
     fn get_result_var_type(&mut self) -> Type {
@@ -121,6 +131,24 @@ impl SSA_CFG_Compiler {
             }
         }
     }
+
+    // CFG helpers
+    fn create_new_basic_block(&mut self) -> usize {
+        let new_block_id = BlockId(self.get_next_block_id());
+        let new_bb = BasicBlock {
+            id: new_block_id,
+            mem_in: None,
+            phis: vec![],
+            instrs: vec![],
+            term: Terminator::Unreachable
+        };
+        // put new block into current function's CFG and blockid to ind mapping
+        self.cur_func.as_mut().unwrap().blocks.push(new_bb);
+        self.cur_block_ind = self.cur_func.as_ref().unwrap().blocks.len() - 1;
+        self.cur_func.as_mut().unwrap().block_id_to_ind.insert(new_block_id, self.cur_block_ind);
+        return self.cur_block_ind;
+    }
+
 }
 
 impl Visitor for SSA_CFG_Compiler {
@@ -177,6 +205,7 @@ impl Visitor for SSA_CFG_Compiler {
             ret_ty: method_type, 
             values: HashMap::new(),
             blocks: vec![],
+            block_id_to_ind:HashMap::new(),
             blocks_map: HashMap::new(),
         };
 
@@ -187,7 +216,6 @@ impl Visitor for SSA_CFG_Compiler {
         for method_arg in &method_decl.args {
             self.visit_method_arg_decl(method_arg);
         }
-        self.init_method = false;
 
         // visit function block
         self.visit_block(method_decl.body.as_ref());
@@ -197,10 +225,25 @@ impl Visitor for SSA_CFG_Compiler {
         self.program_ir.functions.insert(method_name.clone(), func_ir);
     }
 
-    fn visit_block(&mut self, _block: &AST::Block) {
-        // if not init method increment scope to next child scope of parent and add next child scope of the given parent to stack
+    fn visit_block(&mut self, block: &AST::Block) {
+        // if not init method increment scope 
+        if !self.init_method {
+            self.next_child_scope();
+        }
+        self.init_method = false;
+        
+        self.create_new_basic_block();
+
         // visit all field declarations
+        for field_decl in &block.fields {
+            self.visit_field_decl(field_decl);
+        }
+
         // visit all statements
+        for statement in &block.statements {
+            statement.accept(self);
+        }
+
         // decrement back to parent scope
         self.decrement_to_parent_scope();
     }
@@ -377,7 +420,7 @@ impl Visitor for SSA_CFG_Compiler {
             // if we're creating new variable in scope we should assign it a new value id
             0 | 2 => {
                 if !is_global {
-                    let new_value_id = self.get_cur_value_id();
+                    let new_value_id = self.get_next_value_id();
 
                     // if we are initializing a method then push the parameters as value ids
                     if self.init_method {
@@ -481,12 +524,12 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
             globals: vec![],
             functions: HashMap::new(), 
         },
-        cur_value_id: 0,
-        cur_block_id: 0,
-        cur_mem_id: 0,
+        next_value_id: 0,
+        next_block_id: 0,
+        cur_block_ind: 0,
+        next_mem_id: 0,
         cur_scope_ind: 0,
         cur_func: None,
-        cur_block_ind: 0,
         cur_instr_ind: 0,
         cur_child_scope_map: HashMap::new(),
         var_to_value_id: HashMap::new(),
