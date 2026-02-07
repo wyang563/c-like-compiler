@@ -212,7 +212,7 @@ pub enum CastKind {
 // Terminators
 // -----------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Terminator {
     Br  { mem: ValueId, target: BlockId },
     CBr { mem: ValueId, cond: ValueId, then_bb: BlockId, else_bb: BlockId },

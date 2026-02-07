@@ -1,8 +1,11 @@
-use super::super::parser::visitor::{Visitor};
-use super::super::semantics::symbol_table::{SymbolTable, Entry as SymEntry, Type as SymType};
+use super::super::parser::visitor::Visitor;
 use super::super::parser::AST;
-use super::three_address_code::{ProgramIR, FunctionIR, Symbol, GlobalDecl, GlobalKind, Type, ConstValue, ValueId, BlockId, ValueInfo, BasicBlock, Terminator};
-use std::collections::{HashSet, HashMap};
+use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
+use super::three_address_code::{
+    BasicBlock, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ProgramIR, Symbol,
+    Terminator, Type, ValueId, ValueInfo,
+};
+use std::collections::{HashMap, HashSet};
 
 #[allow(non_camel_case_types)]
 pub struct SSA_CFG_Compiler {
@@ -16,19 +19,20 @@ pub struct SSA_CFG_Compiler {
     var_to_value_id: HashMap<usize, HashMap<String, u32>>,
 
     // tracking state (globally)
-    next_value_id: u32, // for creating new vars  
+    next_value_id: u32, // for creating new vars
     next_block_id: u32, // next block id to create
-    next_mem_id: u32, // for naming new mem side effect vars
+    next_mem_id: u32,   // for naming new mem side effect vars
     cur_scope_ind: usize,
     symbol_table: SymbolTable,
-    
+
     // tracking state (per-function or per-scope)
     cur_func: Option<FunctionIR>, // None if we are in global scope
     cur_child_scope_map: HashMap<usize, usize>, // map from parent scope idx to which child scope idx we're on
-    cur_block_ind: usize, // cur block id we are processing 
+    cur_block_ind: usize,                       // cur block ind we are processing
 
-    // by basic block tracking
+    // tracking state by basic block
     cur_instr_ind: usize,
+    block_func_returned: bool,
 
     // result store variables
     result_var_type: Type,
@@ -37,14 +41,14 @@ pub struct SSA_CFG_Compiler {
     result_array_literal_values: Option<Vec<ConstValue>>,
 
     // flags
-    init_method: bool
+    init_method: bool,
 }
 
 impl SSA_CFG_Compiler {
     // helpers for getting state
     fn get_next_value_id(&mut self) -> u32 {
         self.next_value_id += 1;
-        return self.next_value_id - 1
+        return self.next_value_id - 1;
     }
 
     fn get_next_block_id(&mut self) -> u32 {
@@ -82,14 +86,15 @@ impl SSA_CFG_Compiler {
     }
 
     // scope incr helpers
-    // incrs cur_scope_ind and cur_child_scope_map to reflect 
+    // incrs cur_scope_ind and cur_child_scope_map to reflect
     fn next_child_scope(&mut self) {
         let cur_scope = self.symbol_table.scopes[self.cur_scope_ind].as_ref();
         let child_scope_ind_in_list = *self
             .cur_child_scope_map
             .entry(self.cur_scope_ind)
             .or_insert(0); // index of children_inds element we are on
-        *self.cur_child_scope_map
+        *self
+            .cur_child_scope_map
             .get_mut(&self.cur_scope_ind)
             .expect("missing child-scope counter for parent scope") += 1;
 
@@ -107,13 +112,16 @@ impl SSA_CFG_Compiler {
         match scope.entries.get(var_name) {
             Some(entry) => entry,
             None => {
-                eprintln!("Error: variable {} not found in scope {}", var_name, scope_ind);
+                eprintln!(
+                    "Error: variable {} not found in scope {}",
+                    var_name, scope_ind
+                );
                 panic!();
             }
         }
     }
 
-    // find idx of scope where variable is defined based off the current scope we're in 
+    // find idx of scope where variable is defined based off the current scope we're in
     fn get_var_scope_ind(&self, var_name: &str) -> usize {
         let mut search_scope_ind = self.cur_scope_ind;
         // loop through parents scope until we find reference to variable
@@ -125,7 +133,10 @@ impl SSA_CFG_Compiler {
             search_scope_ind = match cur_scope.parent_ind {
                 Some(parent_ind) => parent_ind,
                 None => {
-                    eprintln!("Error: variable {} not found in any scope starting at {}", var_name, self.cur_scope_ind);
+                    eprintln!(
+                        "Error: variable {} not found in any scope starting at {}",
+                        var_name, self.cur_scope_ind
+                    );
                     panic!();
                 }
             }
@@ -140,15 +151,29 @@ impl SSA_CFG_Compiler {
             mem_in: None,
             phis: vec![],
             instrs: vec![],
-            term: Terminator::Unreachable
+            term: Terminator::Unreachable,
         };
         // put new block into current function's CFG and blockid to ind mapping
         self.cur_func.as_mut().unwrap().blocks.push(new_bb);
         self.cur_block_ind = self.cur_func.as_ref().unwrap().blocks.len() - 1;
-        self.cur_func.as_mut().unwrap().block_id_to_ind.insert(new_block_id, self.cur_block_ind);
+        self.cur_func
+            .as_mut()
+            .unwrap()
+            .block_id_to_ind
+            .insert(new_block_id, self.cur_block_ind);
+
+        // set per block flags
+        self.cur_instr_ind = 0;
+        self.block_func_returned = false;
         return self.cur_block_ind;
     }
 
+    fn is_terminator_unreachable(&self) -> bool {
+        let cur_terminator = self.cur_func.as_ref().unwrap().blocks[self.cur_block_ind]
+            .term
+            .clone();
+        return cur_terminator == Terminator::Unreachable;
+    }
 }
 
 impl Visitor for SSA_CFG_Compiler {
@@ -170,7 +195,7 @@ impl Visitor for SSA_CFG_Compiler {
     fn visit_import_decl(&mut self, import_decl: &AST::ImportDecl) {
         let import_decl_name = import_decl.import_id.name.clone();
         self.imported_funcs.insert(import_decl_name.clone());
-        
+
         // convert import name to byte string and push to globals
         let mut bytes: Vec<i8> = import_decl_name
             .as_bytes()
@@ -180,12 +205,10 @@ impl Visitor for SSA_CFG_Compiler {
         bytes.push(0);
         self.program_ir.globals.push(GlobalDecl {
             sym: Symbol(import_decl_name.clone()),
-            kind: GlobalKind::GlobalStr {
-                bytes,
-            },
+            kind: GlobalKind::GlobalStr { bytes },
         });
     }
-    
+
     fn visit_field_decl(&mut self, field_decl: &AST::FieldDecl) {
         for var_decl in &field_decl.vars {
             self.visit_var_decl(var_decl);
@@ -202,10 +225,10 @@ impl Visitor for SSA_CFG_Compiler {
         let function_ir = FunctionIR {
             name: Symbol(method_name.clone()),
             params: vec![],
-            ret_ty: method_type, 
+            ret_ty: method_type.clone(),
             values: HashMap::new(),
             blocks: vec![],
-            block_id_to_ind:HashMap::new(),
+            block_id_to_ind: HashMap::new(),
             blocks_map: HashMap::new(),
         };
 
@@ -220,18 +243,27 @@ impl Visitor for SSA_CFG_Compiler {
         // visit function block
         self.visit_block(method_decl.body.as_ref());
 
+        // insert terminal return node if not already
+        if self.is_terminator_unreachable() {
+            let mem = ValueId(self.get_next_mem_id());
+            let cur_node = &mut self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind];
+            cur_node.term = Terminator::RetVoid { mem };
+        }
+
         // insert into functions in program IR
         let func_ir = self.cur_func.take().unwrap();
-        self.program_ir.functions.insert(method_name.clone(), func_ir);
+        self.program_ir
+            .functions
+            .insert(method_name.clone(), func_ir);
     }
 
     fn visit_block(&mut self, block: &AST::Block) {
-        // if not init method increment scope 
+        // if not init method increment scope
         if !self.init_method {
             self.next_child_scope();
         }
         self.init_method = false;
-        
+
         self.create_new_basic_block();
 
         // visit all field declarations
@@ -248,7 +280,7 @@ impl Visitor for SSA_CFG_Compiler {
         self.decrement_to_parent_scope();
     }
 
-    fn visit_var_decl(&mut self, var_decl: &AST::VarDecl) { 
+    fn visit_var_decl(&mut self, var_decl: &AST::VarDecl) {
         self.visit_identifier(var_decl.name.as_ref());
         let var_name = var_decl.name.name.clone();
         let var_type = self.get_result_var_type();
@@ -262,7 +294,8 @@ impl Visitor for SSA_CFG_Compiler {
         if var_decl.is_array {
             // if explicit length given then use that
             if var_decl.array_len.as_ref().as_ref().is_some() {
-                let init_array_len_str = var_decl.array_len.as_ref().as_ref().unwrap().value.clone(); 
+                let init_array_len_str =
+                    var_decl.array_len.as_ref().as_ref().unwrap().value.clone();
                 init_array_len = Some(init_array_len_str.parse::<i32>().unwrap() as usize);
             } else {
                 match var_decl.initializer.as_ref().as_ref().unwrap() {
@@ -274,7 +307,7 @@ impl Visitor for SSA_CFG_Compiler {
                         if let Some(values) = init_array_values.as_ref() {
                             init_array_len = Some(values.len());
                         }
-                    },
+                    }
                     _ => {
                         eprintln!("Error: expected array literal for array initializer");
                         panic!();
@@ -287,7 +320,7 @@ impl Visitor for SSA_CFG_Compiler {
                 init_scalar_value = Some(self.get_literal_value());
             }
         }
-        
+
         // global variable declaration case
         if is_global {
             match var_type {
@@ -301,7 +334,7 @@ impl Visitor for SSA_CFG_Compiler {
                         },
                     };
                     self.program_ir.globals.push(global_decl);
-                },
+                }
                 Type::Ptr(elem_ty) => {
                     let global_decl = GlobalDecl {
                         sym: Symbol(var_name),
@@ -309,31 +342,27 @@ impl Visitor for SSA_CFG_Compiler {
                             elem_ty: *elem_ty,
                             len: init_array_len.unwrap() as u32,
                             init: init_array_values.clone(),
-                        }
+                        },
                     };
                     self.program_ir.globals.push(global_decl);
-                },
+                }
                 _ => {
                     eprintln!("Error: invalid global variable type");
                     panic!();
                 }
             }
-        } 
-        // NOTE - since I was dumb and didn't realize we can't initialize variables with values we don't need to do 
-        // anything more here for the case of local variable declarations. 
+        }
+        // NOTE - since I was dumb and didn't realize we can't initialize variables with values we don't need to do
+        // anything more here for the case of local variable declarations.
     }
 
     fn visit_method_arg_decl(&mut self, method_arg_decl: &AST::MethodArgDecl) {
         self.visit_identifier(method_arg_decl.name.as_ref());
     }
 
-    fn visit_if_statement(&mut self, _if_statement: &AST::IfStatement) {
+    fn visit_if_statement(&mut self, _if_statement: &AST::IfStatement) {}
 
-    }
-
-    fn visit_for_statement(&mut self, _for_statement: &AST::ForStatement) {
-
-    }
+    fn visit_for_statement(&mut self, _for_statement: &AST::ForStatement) {}
 
     fn visit_while_statement(&mut self, _while_statement: &AST::WhileStatement) {}
 
@@ -396,7 +425,7 @@ impl Visitor for SSA_CFG_Compiler {
 
         // get variable scope index in symbol table
         let var_scope_ind = self.get_var_scope_ind(id_name);
-        let entry =  self.get_scope_entry(var_scope_ind, id_name);
+        let entry = self.get_scope_entry(var_scope_ind, id_name);
 
         // get type of variable being processed
         self.result_var_type = match &entry.get_type() {
@@ -411,7 +440,7 @@ impl Visitor for SSA_CFG_Compiler {
                 eprintln!("Error: variable {} has invalid type None", id_name);
                 panic!();
             }
-        }; 
+        };
 
         let is_global = var_scope_ind == 0;
         self.result_is_global = Some(is_global);
@@ -424,7 +453,11 @@ impl Visitor for SSA_CFG_Compiler {
 
                     // if we are initializing a method then push the parameters as value ids
                     if self.init_method {
-                        self.cur_func.as_mut().unwrap().params.push(ValueId(new_value_id));
+                        self.cur_func
+                            .as_mut()
+                            .unwrap()
+                            .params
+                            .push(ValueId(new_value_id));
                     }
 
                     self.var_to_value_id
@@ -438,7 +471,7 @@ impl Visitor for SSA_CFG_Compiler {
                         declared_location: None,
                         use_chain: vec![],
                         org_name: id_name.to_string(),
-                        debug_name: id_name.to_string()
+                        debug_name: id_name.to_string(),
                     };
                     self.cur_func
                         .as_mut()
@@ -446,7 +479,7 @@ impl Visitor for SSA_CFG_Compiler {
                         .values
                         .insert(ValueId(new_value_id), new_value_info);
                 }
-            },
+            }
             1 => (),
             _ => {
                 eprintln!("Error: invalid identifier status must be one of (0, 1, 2)");
@@ -515,14 +548,14 @@ impl Visitor for SSA_CFG_Compiler {
         };
 
         self.result_literal_value = Some(ConstValue::I32(ch as i32));
-    }   
+    }
 }
 
 pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> ProgramIR {
     let mut ssa_cfg_compiler = SSA_CFG_Compiler {
         program_ir: ProgramIR {
             globals: vec![],
-            functions: HashMap::new(), 
+            functions: HashMap::new(),
         },
         next_value_id: 0,
         next_block_id: 0,
@@ -539,8 +572,11 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
         result_is_global: None,
         result_literal_value: None,
         result_array_literal_values: None,
-        init_method: false
+        init_method: false,
+        block_func_returned: false,
     };
     ssa_cfg_compiler.visit_program(&ast);
+
+    // compile phi nodes and mem-in nodes
     return ssa_cfg_compiler.program_ir;
 }
