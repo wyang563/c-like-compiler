@@ -318,12 +318,19 @@ impl Visitor for SSA_CFG_Compiler {
             self.visit_method_arg_decl(method_arg);
         }
 
-        // visit function block
+        // Initialize memory for this function
+        self.cur_mem = ValueId(self.get_next_mem_id());
+
+        // Create entry block for the method body
+        // This must be done BEFORE calling visit_block
+        self.create_new_basic_block();
+
+        // visit function block (scope handling + statement processing)
         self.visit_block(method_decl.body.as_ref());
 
         // insert terminal return node if not already
         if self.is_terminator_unreachable() {
-            let mem = ValueId(self.get_next_mem_id());
+            let mem = self.new_mem();
             let cur_node = &mut self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind];
             cur_node.term = Terminator::RetVoid { mem };
         }
@@ -336,25 +343,40 @@ impl Visitor for SSA_CFG_Compiler {
     }
 
     fn visit_block(&mut self, block: &AST::Block) {
-        // if not init method increment scope
+        // Scope management: increment scope for nested blocks
+        // (but not for method entry, which is handled by init_method flag)
         if !self.init_method {
             self.next_child_scope();
         }
         self.init_method = false;
 
-        self.create_new_basic_block();
+        // NOTE: Block creation is the responsibility of the CALLER, not visit_block.
+        // - visit_method_decl should create the entry block before calling this
+        // - visit_if_statement should create then/else blocks before calling this
+        // - visit_while_statement should create body block before calling this
+        // - visit_for_statement should create body block before calling this
+        // This keeps the separation of concerns clean:
+        //   - CFG structure (blocks, edges) = caller's responsibility
+        //   - Scope management + statement processing = visit_block's responsibility
 
-        // visit all field declarations
+        // Visit all field declarations (local variables in this scope)
         for field_decl in &block.fields {
             self.visit_field_decl(field_decl);
         }
 
-        // visit all statements
+        // Visit all statements in sequence
         for statement in &block.statements {
+            // If a previous statement set a terminator (return, break, continue),
+            // stop processing statements in this block
+            if !self.is_terminator_unreachable() {
+                // Block already has a terminator, remaining statements are unreachable
+                // In a robust compiler, we might warn about unreachable code here
+                break;
+            }
             statement.accept(self);
         }
 
-        // decrement back to parent scope
+        // Decrement back to parent scope
         self.decrement_to_parent_scope();
     }
 
