@@ -7,45 +7,76 @@ use super::three_address_code::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// Context information for a loop (while/for)
+/// Used by break/continue to determine jump targets
+#[derive(Clone, Debug)]
+pub struct LoopContext {
+    /// The block where the loop condition is evaluated
+    pub header_block: BlockId,
+
+    /// The block to jump to when exiting the loop (used by 'break')
+    pub exit_block: BlockId,
+
+    /// The block to jump to for 'continue'
+    /// - For 'while' loops: same as header_block
+    /// - For 'for' loops: the update block
+    pub continue_target: BlockId,
+}
+
 #[allow(non_camel_case_types)]
 pub struct SSA_CFG_Compiler {
-    // final output IR
+    // ==================== Final Output ====================
     program_ir: ProgramIR,
 
-    // variable/func tracking
+    // ==================== Symbol Table & Scope ====================
+    symbol_table: SymbolTable,
+    cur_scope_ind: usize,
+    cur_child_scope_map: HashMap<usize, usize>, // parent scope idx -> which child scope we're on
+
+    // ==================== Global Tracking ====================
     imported_funcs: HashSet<String>,
 
-    // variable value id tracking by scope (need it by scope for SSA compliance across all non-global scopes)
-    var_to_value_id: HashMap<usize, HashMap<String, u32>>,
+    // ==================== ID Generators ====================
+    next_value_id: u32,
+    next_block_id: u32,
+    next_mem_id: u32,
 
-    // tracking state (globally)
-    next_value_id: u32, // for creating new vars
-    next_block_id: u32, // next block id to create
-    next_mem_id: u32,   // for naming new mem side effect vars
-    cur_scope_ind: usize,
-    symbol_table: SymbolTable,
+    // ==================== Current Function State ====================
+    cur_func: Option<FunctionIR>, // None when in global scope
 
-    // tracking state (per-function or per-scope)
-    cur_func: Option<FunctionIR>, // None if we are in global scope
-    cur_child_scope_map: HashMap<usize, usize>, // map from parent scope idx to which child scope idx we're on
-    cur_block_ind: usize,                       // cur block ind we are processing
+    // ==================== Current Block State ====================
+    cur_block_ind: usize,  // Index into cur_func.blocks
+    cur_mem: ValueId,      // Current memory token for threading
 
-    // tracking state by basic block
-    cur_instr_ind: usize,
-    block_func_returned: bool,
+    // ==================== Control Flow Tracking ====================
+    /// Stack of loop contexts for handling break/continue
+    /// Innermost loop is at the end of the vector
+    loop_stack: Vec<LoopContext>,
 
-    // result store variables
+    /// Track predecessor blocks for each block (needed for phi insertion in Pass 2)
+    /// Maps: BlockId -> Vec<BlockId> of predecessors
+    block_predecessors: HashMap<BlockId, Vec<BlockId>>,
+
+    // ==================== Variable Tracking ====================
+    /// Maps scope index -> variable name -> current ValueId
+    /// Used to track which ValueId a variable currently maps to in each scope
+    var_to_value_id: HashMap<usize, HashMap<String, ValueId>>,
+
+    // ==================== Result/Temporary Storage ====================
+    // These store intermediate results from visitor methods
+    result_value_id: Option<ValueId>,  // For expression results
     result_var_type: Type,
     result_is_global: Option<bool>, // tracks whether an identifier processed is a global
     result_literal_value: Option<ConstValue>,
     result_array_literal_values: Option<Vec<ConstValue>>,
 
-    // flags
-    init_method: bool,
+    // ==================== Flags ====================
+    init_method: bool,  // True when initializing a method (for parameter handling)
 }
 
 impl SSA_CFG_Compiler {
-    // helpers for getting state
+    // ==================== ID Generators ====================
+
     fn get_next_value_id(&mut self) -> u32 {
         self.next_value_id += 1;
         return self.next_value_id - 1;
@@ -59,6 +90,20 @@ impl SSA_CFG_Compiler {
     fn get_next_mem_id(&mut self) -> u32 {
         self.next_mem_id += 1;
         return self.next_mem_id - 1;
+    }
+
+    // ==================== Result Getters/Setters ====================
+
+    /// Get and consume the result value ID from an expression
+    fn get_result_value_id(&mut self) -> ValueId {
+        let value_id = self.result_value_id.expect("No result value ID available");
+        self.result_value_id = None; // Reset for safety
+        value_id
+    }
+
+    /// Set the result value ID for an expression
+    fn set_result_value_id(&mut self, value_id: ValueId) {
+        self.result_value_id = Some(value_id);
     }
 
     fn get_result_var_type(&mut self) -> Type {
@@ -85,7 +130,42 @@ impl SSA_CFG_Compiler {
         return array_literal_values;
     }
 
-    // scope incr helpers
+    // ==================== Loop Context Methods ====================
+
+    /// Get the current loop context (panics if not in a loop)
+    fn current_loop_context(&self) -> &LoopContext {
+        self.loop_stack.last().expect("Not inside a loop")
+    }
+
+    /// Check if we're currently inside a loop
+    fn is_in_loop(&self) -> bool {
+        !self.loop_stack.is_empty()
+    }
+
+    // ==================== Block/CFG Helper Methods ====================
+
+    /// Add a predecessor edge for phi construction later
+    fn add_predecessor(&mut self, block_id: BlockId, pred_id: BlockId) {
+        self.block_predecessors
+            .entry(block_id)
+            .or_insert_with(Vec::new)
+            .push(pred_id);
+    }
+
+    /// Get the current block's ID
+    fn current_block_id(&self) -> BlockId {
+        self.cur_func.as_ref()
+            .expect("No current function")
+            .blocks[self.cur_block_ind]
+            .id
+    }
+
+    /// Create a new memory value and return it
+    fn new_mem(&mut self) -> ValueId {
+        ValueId(self.get_next_mem_id())
+    }
+
+    // ==================== Scope Management ====================
     // incrs cur_scope_ind and cur_child_scope_map to reflect
     fn next_child_scope(&mut self) {
         let cur_scope = self.symbol_table.scopes[self.cur_scope_ind].as_ref();
@@ -143,7 +223,8 @@ impl SSA_CFG_Compiler {
         }
     }
 
-    // CFG helpers
+    // ==================== CFG Construction Helpers ====================
+
     fn create_new_basic_block(&mut self) -> usize {
         let new_block_id = BlockId(self.get_next_block_id());
         let new_bb = BasicBlock {
@@ -162,9 +243,6 @@ impl SSA_CFG_Compiler {
             .block_id_to_ind
             .insert(new_block_id, self.cur_block_ind);
 
-        // set per block flags
-        self.cur_instr_ind = 0;
-        self.block_func_returned = false;
         return self.cur_block_ind;
     }
 
@@ -463,7 +541,7 @@ impl Visitor for SSA_CFG_Compiler {
                     self.var_to_value_id
                         .entry(var_scope_ind)
                         .or_insert(HashMap::new())
-                        .insert(id_name.to_string(), new_value_id); // placeholder value id
+                        .insert(id_name.to_string(), ValueId(new_value_id));
 
                     // put newly declared variable in FunctionIR values map
                     let new_value_info = ValueInfo {
@@ -553,30 +631,53 @@ impl Visitor for SSA_CFG_Compiler {
 
 pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> ProgramIR {
     let mut ssa_cfg_compiler = SSA_CFG_Compiler {
+        // Output
         program_ir: ProgramIR {
             globals: vec![],
             functions: HashMap::new(),
         },
+
+        // Symbol table
+        symbol_table,
+        cur_scope_ind: 0,
+        cur_child_scope_map: HashMap::new(),
+
+        // Global tracking
+        imported_funcs: HashSet::new(),
+
+        // ID generators
         next_value_id: 0,
         next_block_id: 0,
-        cur_block_ind: 0,
         next_mem_id: 0,
-        cur_scope_ind: 0,
+
+        // Function state
         cur_func: None,
-        cur_instr_ind: 0,
-        cur_child_scope_map: HashMap::new(),
+
+        // Block state
+        cur_block_ind: 0,
+        cur_mem: ValueId(0), // Will be initialized properly per function
+
+        // Control flow
+        loop_stack: Vec::new(),
+        block_predecessors: HashMap::new(),
+
+        // Variable tracking
         var_to_value_id: HashMap::new(),
-        symbol_table: symbol_table,
-        imported_funcs: HashSet::new(),
+
+        // Result storage
+        result_value_id: None,
         result_var_type: Type::None,
         result_is_global: None,
         result_literal_value: None,
         result_array_literal_values: None,
+
+        // Flags
         init_method: false,
-        block_func_returned: false,
     };
     ssa_cfg_compiler.visit_program(&ast);
 
-    // compile phi nodes and mem-in nodes
+    // TODO: Pass 2 - phi node insertion and variable renaming
+    // insert_phi_nodes(&mut ssa_cfg_compiler.program_ir);
+
     return ssa_cfg_compiler.program_ir;
 }
