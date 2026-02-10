@@ -11,15 +11,8 @@ use std::collections::{HashMap, HashSet};
 /// Used by break/continue to determine jump targets
 #[derive(Clone, Debug)]
 pub struct LoopContext {
-    /// The block where the loop condition is evaluated
     pub header_block: BlockId,
-
-    /// The block to jump to when exiting the loop (used by 'break')
     pub exit_block: BlockId,
-
-    /// The block to jump to for 'continue'
-    /// - For 'while' loops: same as header_block
-    /// - For 'for' loops: the update block
     pub continue_target: BlockId,
 }
 
@@ -45,33 +38,30 @@ pub struct SSA_CFG_Compiler {
     cur_func: Option<FunctionIR>, // None when in global scope
 
     // ==================== Current Block State ====================
-    cur_block_ind: usize,  // Index into cur_func.blocks
-    cur_mem: ValueId,      // Current memory token for threading
+    cur_block_ind: usize, // Index into cur_func.blocks
+    cur_mem: ValueId,     // Current memory token for threading
 
-    // ==================== Control Flow Tracking ====================
-    /// Stack of loop contexts for handling break/continue
-    /// Innermost loop is at the end of the vector
+    // Stack of loop contexts for handling break/continue
     loop_stack: Vec<LoopContext>,
 
-    /// Track predecessor blocks for each block (needed for phi insertion in Pass 2)
-    /// Maps: BlockId -> Vec<BlockId> of predecessors
+    // Track predecessor blocks for each block (needed for phi insertion in Pass 2)
+    // Maps: BlockId -> Vec<BlockId> of predecessors
     block_predecessors: HashMap<BlockId, Vec<BlockId>>,
 
-    // ==================== Variable Tracking ====================
-    /// Maps scope index -> variable name -> current ValueId
-    /// Used to track which ValueId a variable currently maps to in each scope
+    // Maps scope index -> variable name -> current ValueId
+    // Used to track which ValueId a variable currently maps to in each scope
     var_to_value_id: HashMap<usize, HashMap<String, ValueId>>,
 
     // ==================== Result/Temporary Storage ====================
     // These store intermediate results from visitor methods
-    result_value_id: Option<ValueId>,  // For expression results
+    result_value_id: Option<ValueId>, // For expression results
     result_var_type: Type,
     result_is_global: Option<bool>, // tracks whether an identifier processed is a global
     result_literal_value: Option<ConstValue>,
     result_array_literal_values: Option<Vec<ConstValue>>,
 
     // ==================== Flags ====================
-    init_method: bool,  // True when initializing a method (for parameter handling)
+    init_method: bool, // True when initializing a method (for parameter handling)
 }
 
 impl SSA_CFG_Compiler {
@@ -154,10 +144,7 @@ impl SSA_CFG_Compiler {
 
     /// Get the current block's ID
     fn current_block_id(&self) -> BlockId {
-        self.cur_func.as_ref()
-            .expect("No current function")
-            .blocks[self.cur_block_ind]
-            .id
+        self.cur_func.as_ref().expect("No current function").blocks[self.cur_block_ind].id
     }
 
     /// Create a new memory value and return it
@@ -225,23 +212,24 @@ impl SSA_CFG_Compiler {
 
     // ==================== CFG Construction Helpers ====================
 
-    fn create_new_basic_block(&mut self) -> usize {
-        let new_block_id = BlockId(self.get_next_block_id());
+    /// Create a new basic block with a specific pre-allocated block ID
+    /// and set it as the current block
+    fn start_block_with_id(&mut self, block_id: BlockId) -> usize {
         let new_bb = BasicBlock {
-            id: new_block_id,
+            id: block_id,
             mem_in: None,
             phis: vec![],
             instrs: vec![],
             term: Terminator::Unreachable,
         };
-        // put new block into current function's CFG and blockid to ind mapping
+
         self.cur_func.as_mut().unwrap().blocks.push(new_bb);
         self.cur_block_ind = self.cur_func.as_ref().unwrap().blocks.len() - 1;
         self.cur_func
             .as_mut()
             .unwrap()
             .block_id_to_ind
-            .insert(new_block_id, self.cur_block_ind);
+            .insert(block_id, self.cur_block_ind);
 
         return self.cur_block_ind;
     }
@@ -318,14 +306,13 @@ impl Visitor for SSA_CFG_Compiler {
             self.visit_method_arg_decl(method_arg);
         }
 
-        // Initialize memory for this function
-        self.cur_mem = ValueId(self.get_next_mem_id());
+        self.cur_mem = ValueId(self.get_next_mem_id()); // initialize memory token for function
 
-        // Create entry block for the method body
-        // This must be done BEFORE calling visit_block
-        self.create_new_basic_block();
+        // Create entry block for function
+        let entry_block_id = BlockId(self.get_next_block_id());
+        self.start_block_with_id(entry_block_id);
 
-        // visit function block (scope handling + statement processing)
+        // visit function block
         self.visit_block(method_decl.body.as_ref());
 
         // insert terminal return node if not already
@@ -343,40 +330,26 @@ impl Visitor for SSA_CFG_Compiler {
     }
 
     fn visit_block(&mut self, block: &AST::Block) {
-        // Scope management: increment scope for nested blocks
-        // (but not for method entry, which is handled by init_method flag)
+        // if not init method increment scope
         if !self.init_method {
             self.next_child_scope();
         }
         self.init_method = false;
 
-        // NOTE: Block creation is the responsibility of the CALLER, not visit_block.
-        // - visit_method_decl should create the entry block before calling this
-        // - visit_if_statement should create then/else blocks before calling this
-        // - visit_while_statement should create body block before calling this
-        // - visit_for_statement should create body block before calling this
-        // This keeps the separation of concerns clean:
-        //   - CFG structure (blocks, edges) = caller's responsibility
-        //   - Scope management + statement processing = visit_block's responsibility
-
-        // Visit all field declarations (local variables in this scope)
+        // visit all field declarations
         for field_decl in &block.fields {
             self.visit_field_decl(field_decl);
         }
 
-        // Visit all statements in sequence
+        // visit all statements
         for statement in &block.statements {
-            // If a previous statement set a terminator (return, break, continue),
-            // stop processing statements in this block
             if !self.is_terminator_unreachable() {
-                // Block already has a terminator, remaining statements are unreachable
-                // In a robust compiler, we might warn about unreachable code here
                 break;
             }
             statement.accept(self);
         }
 
-        // Decrement back to parent scope
+        // decrement back to parent scope
         self.decrement_to_parent_scope();
     }
 
@@ -460,7 +433,74 @@ impl Visitor for SSA_CFG_Compiler {
         self.visit_identifier(method_arg_decl.name.as_ref());
     }
 
-    fn visit_if_statement(&mut self, _if_statement: &AST::IfStatement) {}
+    fn visit_if_statement(&mut self, if_statement: &AST::IfStatement) {
+        let entry_block_id = self.current_block_id();
+
+        // Evaluate the condition expression in the current block
+        self.visit_expression(&if_statement.condition);
+        let cond_value = self.get_result_value_id();
+
+        // Pre-allocate block IDs for then, else (if needed), and merge blocks
+        let then_bb_id = BlockId(self.get_next_block_id());
+        let merge_bb_id = BlockId(self.get_next_block_id());
+        let else_bb_id = if if_statement.else_block.as_ref().is_some() {
+            BlockId(self.get_next_block_id())
+        } else {
+            merge_bb_id // If no else clause, false branch goes directly to merge
+        };
+
+        // Set the conditional branch terminator on the current (entry) block
+        let mem = self.new_mem();
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
+            mem,
+            cond: cond_value,
+            then_bb: then_bb_id,
+            else_bb: else_bb_id,
+        };
+
+        // Record predecessor edges for phi insertion later
+        self.add_predecessor(then_bb_id, entry_block_id);
+        if if_statement.else_block.as_ref().is_some() {
+            self.add_predecessor(else_bb_id, entry_block_id);
+        } else {
+            // If no else, entry goes directly to merge on false branch
+            self.add_predecessor(merge_bb_id, entry_block_id);
+        }
+
+        // Create and visit the 'then' block
+        self.start_block_with_id(then_bb_id);
+        self.visit_block(if_statement.then_block.as_ref());
+
+        // Terminate then block with jump to merge (if not already terminated by return/break)
+        if self.is_terminator_unreachable() {
+            let mem = self.new_mem();
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+                mem,
+                target: merge_bb_id,
+            };
+            self.add_predecessor(merge_bb_id, then_bb_id);
+        }
+
+        // Create and visit the 'else' block if it exists
+        if let Some(else_block) = if_statement.else_block.as_ref().as_ref() {
+            self.start_block_with_id(else_bb_id);
+            self.visit_block(else_block);
+
+            // Terminate else block with jump to merge (if not already terminated)
+            if self.is_terminator_unreachable() {
+                let mem = self.new_mem();
+                self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+                    mem,
+                    target: merge_bb_id,
+                };
+                self.add_predecessor(merge_bb_id, else_bb_id);
+            }
+        }
+
+        // Create the merge block and continue execution there
+        self.start_block_with_id(merge_bb_id);
+        // Execution continues in the merge block for subsequent statements
+    }
 
     fn visit_for_statement(&mut self, _for_statement: &AST::ForStatement) {}
 
@@ -472,7 +512,12 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_assignment(&mut self, _assignment: &AST::Assignment) {}
 
-    fn visit_expression(&mut self, _expr: &AST::ASTNode) {}
+    fn visit_expression(&mut self, _expr: &AST::ASTNode) {
+        // TODO: Implement full expression evaluation
+        // For now, create a placeholder value to allow control flow testing
+        let placeholder_value = ValueId(self.get_next_value_id());
+        self.set_result_value_id(placeholder_value);
+    }
 
     fn visit_method_call(&mut self, _method_call: &AST::MethodCall) {}
 
