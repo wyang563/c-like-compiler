@@ -2,7 +2,7 @@ use super::super::parser::visitor::Visitor;
 use super::super::parser::AST;
 use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
 use super::three_address_code::{
-    BasicBlock, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, Instr, InstrKind,
+    BasicBlock, BinOp, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, Instr, InstrKind,
     ProgramIR, Symbol, Terminator, Type, ValueId, ValueInfo,
 };
 use std::collections::{HashMap, HashSet};
@@ -244,6 +244,80 @@ impl SSA_CFG_Compiler {
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
             .instrs
             .push(instr);
+    }
+
+    /// Read a scalar variable's current value (local: lookup, global: GlobalAddr + Load)
+    fn read_scalar_var(
+        &mut self,
+        var_name: &str,
+        var_scope_ind: usize,
+        is_global: bool,
+        var_type: &Type,
+    ) -> ValueId {
+        if is_global {
+            let addr = self.new_value(Type::Ptr(Box::new(var_type.clone())), var_name);
+            self.emit_instr(
+                vec![addr],
+                InstrKind::GlobalAddr {
+                    sym: Symbol(var_name.to_string()),
+                    ty: var_type.clone(),
+                },
+            );
+            let mem_in = self.cur_mem;
+            let mem_out = self.new_value(Type::Mem, "");
+            let load_result = self.new_value(var_type.clone(), var_name);
+            self.emit_instr(
+                vec![mem_out, load_result],
+                InstrKind::Load {
+                    ty: var_type.clone(),
+                    mem: mem_in,
+                    addr,
+                },
+            );
+            self.cur_mem = mem_out;
+            load_result
+        } else {
+            *self
+                .var_to_value_id
+                .get(&var_scope_ind)
+                .and_then(|scope_map| scope_map.get(var_name))
+                .unwrap_or_else(|| {
+                    panic!("Variable {} not found in scope {}", var_name, var_scope_ind)
+                })
+        }
+    }
+
+    /// Write a value to a global scalar variable (GlobalAddr + Store)
+    fn write_global_scalar(&mut self, var_name: &str, var_type: &Type, value: ValueId) {
+        let addr = self.new_value(Type::Ptr(Box::new(var_type.clone())), var_name);
+        self.emit_instr(
+            vec![addr],
+            InstrKind::GlobalAddr {
+                sym: Symbol(var_name.to_string()),
+                ty: var_type.clone(),
+            },
+        );
+        let mem_in = self.cur_mem;
+        let mem_out = self.new_value(Type::Mem, "");
+        self.emit_instr(
+            vec![mem_out],
+            InstrKind::Store {
+                ty: var_type.clone(),
+                mem: mem_in,
+                addr,
+                value,
+            },
+        );
+        self.cur_mem = mem_out;
+    }
+
+    /// After visiting a literal (which sets result_literal_value),
+    /// emit a Const instruction and set the result value ID.
+    fn emit_const_from_literal(&mut self, ty: Type) {
+        let const_val = self.get_literal_value();
+        let result = self.new_value(ty, "");
+        self.emit_instr(vec![result], InstrKind::Const(const_val));
+        self.set_result_value_id(result);
     }
 
     fn is_terminator_unreachable(&self) -> bool {
@@ -521,7 +595,9 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_statement_control(&mut self, _statement_control: &AST::StatementControl) {}
 
-    fn visit_assignment(&mut self, _assignment: &AST::Assignment) {}
+    fn visit_assignment(&mut self, assignment: &AST::Assignment) {
+        let assign_op = assignment.assign_op.as_str();
+    }
 
     fn visit_expression(&mut self, expr: &AST::ASTNode) {
         match expr {
@@ -550,31 +626,19 @@ impl Visitor for SSA_CFG_Compiler {
             // Literals - parse value, emit Const instruction, set result_value_id
             AST::ASTNode::IntConstant(int_constant) => {
                 self.visit_int_constant(int_constant);
-                let const_val = self.get_literal_value();
-                let result = self.new_value(Type::I32, "");
-                self.emit_instr(vec![result], InstrKind::Const(const_val));
-                self.set_result_value_id(result);
+                self.emit_const_from_literal(Type::I32);
             }
             AST::ASTNode::LongConstant(long_constant) => {
                 self.visit_long_constant(long_constant);
-                let const_val = self.get_literal_value();
-                let result = self.new_value(Type::I64, "");
-                self.emit_instr(vec![result], InstrKind::Const(const_val));
-                self.set_result_value_id(result);
+                self.emit_const_from_literal(Type::I64);
             }
             AST::ASTNode::BoolConstant(bool_constant) => {
                 self.visit_bool_constant(bool_constant);
-                let const_val = self.get_literal_value();
-                let result = self.new_value(Type::I1, "");
-                self.emit_instr(vec![result], InstrKind::Const(const_val));
-                self.set_result_value_id(result);
+                self.emit_const_from_literal(Type::I1);
             }
             AST::ASTNode::CharConstant(char_constant) => {
                 self.visit_char_constant(char_constant);
-                let const_val = self.get_literal_value();
-                let result = self.new_value(Type::I32, "");
-                self.emit_instr(vec![result], InstrKind::Const(const_val));
-                self.set_result_value_id(result);
+                self.emit_const_from_literal(Type::I32);
             }
 
             // Identifier in expression context (read) - handled by visit_identifier status=1
@@ -698,41 +762,8 @@ impl Visitor for SSA_CFG_Compiler {
             // read: look up or load the variable's current value
             1 => {
                 let var_type = self.result_var_type.clone();
-                if is_global {
-                    // Global variable read: emit GlobalAddr then Load
-                    let addr = self.new_value(Type::Ptr(Box::new(var_type.clone())), id_name);
-                    self.emit_instr(
-                        vec![addr],
-                        InstrKind::GlobalAddr {
-                            sym: Symbol(id_name.to_string()),
-                            ty: var_type.clone(),
-                        },
-                    );
-
-                    let mem_in = self.cur_mem;
-                    let mem_out = self.new_value(Type::Mem, "");
-                    let load_result = self.new_value(var_type.clone(), id_name);
-                    self.emit_instr(
-                        vec![mem_out, load_result],
-                        InstrKind::Load {
-                            ty: var_type,
-                            mem: mem_in,
-                            addr,
-                        },
-                    );
-                    self.cur_mem = mem_out;
-                    self.set_result_value_id(load_result);
-                } else {
-                    // Local variable read: look up current ValueId
-                    let value_id = *self
-                        .var_to_value_id
-                        .get(&var_scope_ind)
-                        .and_then(|scope_map| scope_map.get(id_name))
-                        .unwrap_or_else(|| {
-                            panic!("Variable {} not found in scope {}", id_name, var_scope_ind)
-                        });
-                    self.set_result_value_id(value_id);
-                }
+                let value = self.read_scalar_var(id_name, var_scope_ind, is_global, &var_type);
+                self.set_result_value_id(value);
             }
             _ => {
                 eprintln!("Error: invalid identifier status must be one of (0, 1, 2)");
