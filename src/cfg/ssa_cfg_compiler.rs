@@ -2,8 +2,8 @@ use super::super::parser::visitor::Visitor;
 use super::super::parser::AST;
 use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
 use super::three_address_code::{
-    BasicBlock, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ProgramIR, Symbol,
-    Terminator, Type, ValueId, ValueInfo,
+    BasicBlock, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, Instr, InstrKind,
+    ProgramIR, Symbol, Terminator, Type, ValueId, ValueInfo,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -232,6 +232,30 @@ impl SSA_CFG_Compiler {
             .insert(block_id, self.cur_block_ind);
 
         return self.cur_block_ind;
+    }
+
+    // ==================== Instruction Emission Helpers ====================
+
+    /// Create a new SSA value, register it in the current function's values map
+    fn new_value(&mut self, ty: Type, name: &str) -> ValueId {
+        let id = ValueId(self.get_next_value_id());
+        let info = ValueInfo {
+            ty,
+            declared_location: None,
+            use_chain: vec![],
+            org_name: name.to_string(),
+            debug_name: name.to_string(),
+        };
+        self.cur_func.as_mut().unwrap().values.insert(id, info);
+        id
+    }
+
+    /// Emit an instruction into the current basic block
+    fn emit_instr(&mut self, results: Vec<ValueId>, kind: InstrKind) {
+        let instr = Instr { results, kind };
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+            .instrs
+            .push(instr);
     }
 
     fn is_terminator_unreachable(&self) -> bool {
@@ -499,7 +523,6 @@ impl Visitor for SSA_CFG_Compiler {
 
         // Create the merge block and continue execution there
         self.start_block_with_id(merge_bb_id);
-        // Execution continues in the merge block for subsequent statements
     }
 
     fn visit_for_statement(&mut self, _for_statement: &AST::ForStatement) {}
@@ -512,11 +535,110 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_assignment(&mut self, _assignment: &AST::Assignment) {}
 
-    fn visit_expression(&mut self, _expr: &AST::ASTNode) {
-        // TODO: Implement full expression evaluation
-        // For now, create a placeholder value to allow control flow testing
-        let placeholder_value = ValueId(self.get_next_value_id());
-        self.set_result_value_id(placeholder_value);
+    fn visit_expression(&mut self, expr: &AST::ASTNode) {
+        match expr {
+            AST::ASTNode::BinaryExpression(binary_expr) => {
+                self.visit_binary_expression(binary_expr);
+            }
+            AST::ASTNode::UnaryExpression(unary_expr) => {
+                self.visit_unary_expression(unary_expr);
+            }
+            AST::ASTNode::MethodCall(method_call) => {
+                self.visit_method_call(method_call);
+            }
+            AST::ASTNode::LenCall(len_call) => {
+                self.visit_len_call(len_call);
+            }
+            AST::ASTNode::IntCast(int_cast) => {
+                self.visit_int_cast(int_cast);
+            }
+            AST::ASTNode::LongCast(long_cast) => {
+                self.visit_long_cast(long_cast);
+            }
+            AST::ASTNode::IndexExpression(index_expr) => {
+                self.visit_index_expression(index_expr);
+            }
+
+            // Literals - parse value, emit Const instruction, set result_value_id
+            AST::ASTNode::IntConstant(int_constant) => {
+                self.visit_int_constant(int_constant);
+                let const_val = self.get_literal_value();
+                let result = self.new_value(Type::I32, "");
+                self.emit_instr(vec![result], InstrKind::Const(const_val));
+                self.set_result_value_id(result);
+            }
+            AST::ASTNode::LongConstant(long_constant) => {
+                self.visit_long_constant(long_constant);
+                let const_val = self.get_literal_value();
+                let result = self.new_value(Type::I64, "");
+                self.emit_instr(vec![result], InstrKind::Const(const_val));
+                self.set_result_value_id(result);
+            }
+            AST::ASTNode::BoolConstant(bool_constant) => {
+                self.visit_bool_constant(bool_constant);
+                let const_val = self.get_literal_value();
+                let result = self.new_value(Type::I1, "");
+                self.emit_instr(vec![result], InstrKind::Const(const_val));
+                self.set_result_value_id(result);
+            }
+            AST::ASTNode::CharConstant(char_constant) => {
+                self.visit_char_constant(char_constant);
+                let const_val = self.get_literal_value();
+                let result = self.new_value(Type::I32, "");
+                self.emit_instr(vec![result], InstrKind::Const(const_val));
+                self.set_result_value_id(result);
+            }
+
+            // Identifier in expression context (read)
+            AST::ASTNode::Identifier(identifier) => {
+                self.visit_identifier(identifier);
+                let var_type = self.get_result_var_type();
+                let is_global = self.get_is_global();
+                let var_name = identifier.name.as_str();
+
+                if is_global {
+                    // Global variable read: emit GlobalAddr then Load
+                    let addr = self.new_value(Type::Ptr(Box::new(var_type.clone())), var_name);
+                    self.emit_instr(
+                        vec![addr],
+                        InstrKind::GlobalAddr {
+                            sym: Symbol(var_name.to_string()),
+                            ty: var_type.clone(),
+                        },
+                    );
+
+                    let mem_in = self.cur_mem;
+                    let mem_out = self.new_value(Type::Mem, "");
+                    let load_result = self.new_value(var_type.clone(), var_name);
+                    self.emit_instr(
+                        vec![mem_out, load_result],
+                        InstrKind::Load {
+                            ty: var_type,
+                            mem: mem_in,
+                            addr,
+                        },
+                    );
+                    self.cur_mem = mem_out;
+                    self.set_result_value_id(load_result);
+                } else {
+                    // Local variable read: look up current ValueId
+                    let var_scope_ind = self.get_var_scope_ind(var_name);
+                    let value_id = *self
+                        .var_to_value_id
+                        .get(&var_scope_ind)
+                        .and_then(|scope_map| scope_map.get(var_name))
+                        .unwrap_or_else(|| {
+                            panic!("Variable {} not found in scope {}", var_name, var_scope_ind)
+                        });
+                    self.set_result_value_id(value_id);
+                }
+            }
+
+            _ => {
+                eprintln!("Error: unexpected expression node: {:?}", expr);
+                panic!();
+            }
+        }
     }
 
     fn visit_method_call(&mut self, _method_call: &AST::MethodCall) {}
