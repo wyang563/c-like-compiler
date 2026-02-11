@@ -32,7 +32,6 @@ pub struct SSA_CFG_Compiler {
     // ==================== ID Generators ====================
     next_value_id: u32,
     next_block_id: u32,
-    next_mem_id: u32,
 
     // ==================== Current Function State ====================
     cur_func: Option<FunctionIR>, // None when in global scope
@@ -77,13 +76,7 @@ impl SSA_CFG_Compiler {
         return self.next_block_id - 1;
     }
 
-    fn get_next_mem_id(&mut self) -> u32 {
-        self.next_mem_id += 1;
-        return self.next_mem_id - 1;
-    }
-
     // ==================== Result Getters/Setters ====================
-
     /// Get and consume the result value ID from an expression
     fn get_result_value_id(&mut self) -> ValueId {
         let value_id = self.result_value_id.expect("No result value ID available");
@@ -145,11 +138,6 @@ impl SSA_CFG_Compiler {
     /// Get the current block's ID
     fn current_block_id(&self) -> BlockId {
         self.cur_func.as_ref().expect("No current function").blocks[self.cur_block_ind].id
-    }
-
-    /// Create a new memory value and return it
-    fn new_mem(&mut self) -> ValueId {
-        ValueId(self.get_next_mem_id())
     }
 
     // ==================== Scope Management ====================
@@ -330,7 +318,7 @@ impl Visitor for SSA_CFG_Compiler {
             self.visit_method_arg_decl(method_arg);
         }
 
-        self.cur_mem = ValueId(self.get_next_mem_id()); // initialize memory token for function
+        self.cur_mem = self.new_value(Type::Mem, ""); // initialize memory token for function
 
         // Create entry block for function
         let entry_block_id = BlockId(self.get_next_block_id());
@@ -341,7 +329,7 @@ impl Visitor for SSA_CFG_Compiler {
 
         // insert terminal return node if not already
         if self.is_terminator_unreachable() {
-            let mem = self.new_mem();
+            let mem = self.new_value(Type::Mem, "");
             let cur_node = &mut self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind];
             cur_node.term = Terminator::RetVoid { mem };
         }
@@ -474,7 +462,7 @@ impl Visitor for SSA_CFG_Compiler {
         };
 
         // Set the conditional branch terminator on the current (entry) block
-        let mem = self.new_mem();
+        let mem = self.new_value(Type::Mem, "");
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
             mem,
             cond: cond_value,
@@ -497,7 +485,7 @@ impl Visitor for SSA_CFG_Compiler {
 
         // Terminate then block with jump to merge (if not already terminated by return/break)
         if self.is_terminator_unreachable() {
-            let mem = self.new_mem();
+            let mem = self.new_value(Type::Mem, "");
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
                 mem,
                 target: merge_bb_id,
@@ -512,7 +500,7 @@ impl Visitor for SSA_CFG_Compiler {
 
             // Terminate else block with jump to merge (if not already terminated)
             if self.is_terminator_unreachable() {
-                let mem = self.new_mem();
+                let mem = self.new_value(Type::Mem, "");
                 self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
                     mem,
                     target: merge_bb_id,
@@ -589,49 +577,9 @@ impl Visitor for SSA_CFG_Compiler {
                 self.set_result_value_id(result);
             }
 
-            // Identifier in expression context (read)
+            // Identifier in expression context (read) - handled by visit_identifier status=1
             AST::ASTNode::Identifier(identifier) => {
                 self.visit_identifier(identifier);
-                let var_type = self.get_result_var_type();
-                let is_global = self.get_is_global();
-                let var_name = identifier.name.as_str();
-
-                if is_global {
-                    // Global variable read: emit GlobalAddr then Load
-                    let addr = self.new_value(Type::Ptr(Box::new(var_type.clone())), var_name);
-                    self.emit_instr(
-                        vec![addr],
-                        InstrKind::GlobalAddr {
-                            sym: Symbol(var_name.to_string()),
-                            ty: var_type.clone(),
-                        },
-                    );
-
-                    let mem_in = self.cur_mem;
-                    let mem_out = self.new_value(Type::Mem, "");
-                    let load_result = self.new_value(var_type.clone(), var_name);
-                    self.emit_instr(
-                        vec![mem_out, load_result],
-                        InstrKind::Load {
-                            ty: var_type,
-                            mem: mem_in,
-                            addr,
-                        },
-                    );
-                    self.cur_mem = mem_out;
-                    self.set_result_value_id(load_result);
-                } else {
-                    // Local variable read: look up current ValueId
-                    let var_scope_ind = self.get_var_scope_ind(var_name);
-                    let value_id = *self
-                        .var_to_value_id
-                        .get(&var_scope_ind)
-                        .and_then(|scope_map| scope_map.get(var_name))
-                        .unwrap_or_else(|| {
-                            panic!("Variable {} not found in scope {}", var_name, var_scope_ind)
-                        });
-                    self.set_result_value_id(value_id);
-                }
             }
 
             _ => {
@@ -747,9 +695,48 @@ impl Visitor for SSA_CFG_Compiler {
                         .insert(ValueId(new_value_id), new_value_info);
                 }
             }
-            1 => (),
+            // read: look up or load the variable's current value
+            1 => {
+                let var_type = self.result_var_type.clone();
+                if is_global {
+                    // Global variable read: emit GlobalAddr then Load
+                    let addr = self.new_value(Type::Ptr(Box::new(var_type.clone())), id_name);
+                    self.emit_instr(
+                        vec![addr],
+                        InstrKind::GlobalAddr {
+                            sym: Symbol(id_name.to_string()),
+                            ty: var_type.clone(),
+                        },
+                    );
+
+                    let mem_in = self.cur_mem;
+                    let mem_out = self.new_value(Type::Mem, "");
+                    let load_result = self.new_value(var_type.clone(), id_name);
+                    self.emit_instr(
+                        vec![mem_out, load_result],
+                        InstrKind::Load {
+                            ty: var_type,
+                            mem: mem_in,
+                            addr,
+                        },
+                    );
+                    self.cur_mem = mem_out;
+                    self.set_result_value_id(load_result);
+                } else {
+                    // Local variable read: look up current ValueId
+                    let value_id = *self
+                        .var_to_value_id
+                        .get(&var_scope_ind)
+                        .and_then(|scope_map| scope_map.get(id_name))
+                        .unwrap_or_else(|| {
+                            panic!("Variable {} not found in scope {}", id_name, var_scope_ind)
+                        });
+                    self.set_result_value_id(value_id);
+                }
+            }
             _ => {
                 eprintln!("Error: invalid identifier status must be one of (0, 1, 2)");
+                panic!();
             }
         }
     }
@@ -837,7 +824,6 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
         // ID generators
         next_value_id: 0,
         next_block_id: 0,
-        next_mem_id: 0,
 
         // Function state
         cur_func: None,
