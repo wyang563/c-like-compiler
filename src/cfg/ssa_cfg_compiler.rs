@@ -326,6 +326,21 @@ impl SSA_CFG_Compiler {
             .clone();
         return cur_terminator == Terminator::Unreachable;
     }
+
+    /// Map a compound assignment operator string to the corresponding BinOp
+    fn compound_assign_to_binop(op: &str) -> BinOp {
+        match op {
+            "+=" | "++" => BinOp::Add,
+            "-=" | "--" => BinOp::Sub,
+            "*=" => BinOp::Mul,
+            "/=" => BinOp::SDiv,
+            "%=" => BinOp::SRem,
+            _ => {
+                eprintln!("Error: unsupported compound assignment operator: {}", op);
+                panic!();
+            }
+        }
+    }
 }
 
 impl Visitor for SSA_CFG_Compiler {
@@ -597,6 +612,130 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_assignment(&mut self, assignment: &AST::Assignment) {
         let assign_op = assignment.assign_op.as_str();
+
+        // Resolve the assignment target via visit_location
+        // - Identifier (status 2): sets result_var_type, result_is_global
+        // - IndexExpression (status 2): computes elem addr into result_value_id,
+        //   sets result_var_type to elem type, result_is_global
+        self.visit_location(assignment.assign_var.as_ref());
+        let var_type = self.get_result_var_type();
+        let is_global = self.get_is_global();
+
+        // For ++/--, the RHS is implicit (constant 1). Otherwise, evaluate the RHS expression.
+        let is_inc_dec = assign_op == "++" || assign_op == "--";
+        let mut rhs_value = if is_inc_dec {
+            // Emit constant 1 matching the variable's type
+            let one_const = match &var_type {
+                Type::I32 => ConstValue::I32(1),
+                Type::I64 => ConstValue::I64(1),
+                _ => {
+                    eprintln!("Error: ++/-- on non-integer type");
+                    panic!();
+                }
+            };
+            let one = self.new_value(var_type.clone(), "");
+            self.emit_instr(vec![one], InstrKind::Const(one_const));
+            one
+        } else {
+            let expr = assignment
+                .expr
+                .as_ref()
+                .as_ref()
+                .expect("assignment missing RHS expression");
+            self.visit_expression(expr);
+            self.get_result_value_id()
+        };
+
+        match assignment.assign_var.as_ref() {
+            // Scalar variable assignment
+            AST::ASTNode::Identifier(identifier) => {
+                let var_name = &identifier.name;
+                let var_scope_ind = self.get_var_scope_ind(var_name);
+
+                // Handle compound assignments (+=, -=, *=, /=, %=, ++, --)
+                if assign_op != "=" {
+                    let current_value =
+                        self.read_scalar_var(var_name, var_scope_ind, is_global, &var_type);
+                    let bin_op = Self::compound_assign_to_binop(assign_op);
+                    let result = self.new_value(var_type.clone(), var_name);
+                    self.emit_instr(
+                        vec![result],
+                        InstrKind::BinOp {
+                            op: bin_op,
+                            ty: var_type.clone(),
+                            lhs: current_value,
+                            rhs: rhs_value,
+                        },
+                    );
+                    rhs_value = result;
+                }
+
+                // Write the result back
+                if is_global {
+                    self.write_global_scalar(var_name, &var_type, rhs_value);
+                } else {
+                    self.var_to_value_id
+                        .entry(var_scope_ind)
+                        .or_insert_with(HashMap::new)
+                        .insert(var_name.to_string(), rhs_value);
+                }
+            }
+
+            // Array element assignment
+            AST::ASTNode::IndexExpression(_) => {
+                // visit_index_expression (status 2) put the elem addr in result_value_id
+                let elem_addr = self.get_result_value_id();
+
+                // Handle compound assignments
+                if assign_op != "=" {
+                    // Load current value from element address
+                    let mem_in = self.cur_mem;
+                    let mem_out = self.new_value(Type::Mem, "");
+                    let current_value = self.new_value(var_type.clone(), "");
+                    self.emit_instr(
+                        vec![mem_out, current_value],
+                        InstrKind::Load {
+                            ty: var_type.clone(),
+                            mem: mem_in,
+                            addr: elem_addr,
+                        },
+                    );
+                    self.cur_mem = mem_out;
+
+                    let bin_op = Self::compound_assign_to_binop(assign_op);
+                    let result = self.new_value(var_type.clone(), "");
+                    self.emit_instr(
+                        vec![result],
+                        InstrKind::BinOp {
+                            op: bin_op,
+                            ty: var_type.clone(),
+                            lhs: current_value,
+                            rhs: rhs_value,
+                        },
+                    );
+                    rhs_value = result;
+                }
+
+                // Store the result to element address
+                let mem_in = self.cur_mem;
+                let mem_out = self.new_value(Type::Mem, "");
+                self.emit_instr(
+                    vec![mem_out],
+                    InstrKind::Store {
+                        ty: var_type,
+                        mem: mem_in,
+                        addr: elem_addr,
+                        value: rhs_value,
+                    },
+                );
+                self.cur_mem = mem_out;
+            }
+
+            _ => {
+                eprintln!("Error: invalid assignment target");
+                panic!();
+            }
+        }
     }
 
     fn visit_expression(&mut self, expr: &AST::ASTNode) {
@@ -665,7 +804,91 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_binary_expression(&mut self, _binary_expression: &AST::BinaryExpression) {}
 
-    fn visit_index_expression(&mut self, _index_expression: &AST::IndexExpression) {}
+    fn visit_index_expression(&mut self, index_expression: &AST::IndexExpression) {
+        let array_name = index_expression.id.name.as_str();
+        let var_scope_ind = self.get_var_scope_ind(array_name);
+        let entry = self.get_scope_entry(var_scope_ind, array_name);
+
+        // Get element type from array type
+        let elem_type = match &entry.get_type() {
+            SymType::IntArray => Type::I32,
+            SymType::LongArray => Type::I64,
+            SymType::BoolArray => Type::I1,
+            _ => {
+                eprintln!("Error: index expression on non-array type");
+                panic!();
+            }
+        };
+
+        let is_global = var_scope_ind == 0;
+
+        // Evaluate the index expression first (may clobber result fields)
+        self.visit_expression(&index_expression.idx_expr);
+        let index_value = self.get_result_value_id();
+
+        // Get array base address
+        let base_addr = if is_global {
+            let addr = self.new_value(Type::Ptr(Box::new(elem_type.clone())), array_name);
+            self.emit_instr(
+                vec![addr],
+                InstrKind::GlobalArrayAddr {
+                    sym: Symbol(array_name.to_string()),
+                    elem_ty: elem_type.clone(),
+                },
+            );
+            addr
+        } else {
+            // For local arrays, read the base pointer from the variable mapping
+            self.read_scalar_var(
+                array_name,
+                var_scope_ind,
+                is_global,
+                &Type::Ptr(Box::new(elem_type.clone())),
+            )
+        };
+
+        // Compute element address
+        let elem_addr = self.new_value(Type::Ptr(Box::new(elem_type.clone())), "");
+        self.emit_instr(
+            vec![elem_addr],
+            InstrKind::ElemAddr {
+                elem_ty: elem_type.clone(),
+                base: base_addr,
+                index: index_value,
+            },
+        );
+
+        // Set result fields after sub-expressions are evaluated
+        self.result_var_type = elem_type.clone();
+        self.result_is_global = Some(is_global);
+
+        match index_expression.id.status {
+            // Read: load value from element address
+            1 => {
+                let mem_in = self.cur_mem;
+                let mem_out = self.new_value(Type::Mem, "");
+                let loaded_value = self.new_value(elem_type, "");
+                self.emit_instr(
+                    vec![mem_out, loaded_value],
+                    InstrKind::Load {
+                        ty: self.result_var_type.clone(),
+                        mem: mem_in,
+                        addr: elem_addr,
+                    },
+                );
+                self.cur_mem = mem_out;
+                self.set_result_value_id(loaded_value);
+            }
+            // Write: return element address for caller to store to
+            2 => {
+                self.set_result_value_id(elem_addr);
+            }
+            _ => {
+                eprintln!("Error: invalid index expression id status");
+                panic!();
+            }
+        }
+    }
 
     fn visit_array_literal(&mut self, array_literal: &AST::ArrayLiteral) {
         let mut literal_values: Vec<ConstValue> = vec![];
@@ -676,7 +899,20 @@ impl Visitor for SSA_CFG_Compiler {
         self.result_array_literal_values = Some(literal_values);
     }
 
-    fn visit_location(&mut self, _location: &AST::ASTNode) {}
+    fn visit_location(&mut self, location: &AST::ASTNode) {
+        match location {
+            AST::ASTNode::Identifier(identifier) => {
+                self.visit_identifier(identifier);
+            }
+            AST::ASTNode::IndexExpression(index_expr) => {
+                self.visit_index_expression(index_expr);
+            }
+            _ => {
+                eprintln!("Error: invalid location node: {:?}", location);
+                panic!();
+            }
+        }
+    }
 
     fn visit_literal(&mut self, literal: &AST::ASTNode) {
         match literal {
@@ -725,8 +961,8 @@ impl Visitor for SSA_CFG_Compiler {
         self.result_is_global = Some(is_global);
 
         match identifier.status {
-            // if we're creating new variable in scope we should assign it a new value id
-            0 | 2 => {
+            // declare: allocate a new SSA value for this variable
+            0 => {
                 if !is_global {
                     let new_value_id = self.get_next_value_id();
 
@@ -765,6 +1001,9 @@ impl Visitor for SSA_CFG_Compiler {
                 let value = self.read_scalar_var(id_name, var_scope_ind, is_global, &var_type);
                 self.set_result_value_id(value);
             }
+            // write target: just resolve metadata (result_var_type, result_is_global)
+            // the actual write is handled by the caller (visit_assignment)
+            2 => {}
             _ => {
                 eprintln!("Error: invalid identifier status must be one of (0, 1, 2)");
                 panic!();
