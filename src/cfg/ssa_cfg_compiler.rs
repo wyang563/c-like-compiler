@@ -622,7 +622,22 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_while_statement(&mut self, _while_statement: &AST::WhileStatement) {}
 
-    fn visit_return_statement(&mut self, _return_statement: &AST::ReturnStatement) {}
+    fn visit_return_statement(&mut self, return_statement: &AST::ReturnStatement) {
+        if let Some(expr) = return_statement.expr.as_ref().as_ref() {
+            self.visit_expression(expr);
+            let ret_val = self.get_result_value_id();
+            let mem = self.cur_mem;
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term =
+                Terminator::Ret {
+                    mem,
+                    value: ret_val,
+                };
+        } else {
+            let mem = self.cur_mem;
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term =
+                Terminator::RetVoid { mem };
+        }
+    }
 
     fn visit_statement_control(&mut self, _statement_control: &AST::StatementControl) {}
 
