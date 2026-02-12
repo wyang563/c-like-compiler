@@ -807,7 +807,89 @@ impl Visitor for SSA_CFG_Compiler {
         }
     }
 
-    fn visit_method_call(&mut self, _method_call: &AST::MethodCall) {}
+    fn visit_method_call(&mut self, method_call: &AST::MethodCall) {
+        let method_name = method_call.name.name.clone();
+        let is_imported = self.imported_funcs.contains(&method_name);
+
+        // Look up return type from symbol table (methods are in global scope 0)
+        let entry = self.get_scope_entry(0, &method_name);
+        let ret_ty = match &entry.get_type() {
+            SymType::Int => Type::I32,
+            SymType::Long => Type::I64,
+            SymType::Bool => Type::I1,
+            SymType::Void => Type::Void,
+            _ => {
+                eprintln!("Error: invalid method return type for {}", method_name);
+                panic!();
+            }
+        };
+
+        // Evaluate arguments
+        let mut arg_values: Vec<ValueId> = vec![];
+        for arg in &method_call.args {
+            match arg.as_ref() {
+                // String literal arguments (only valid for imported calls)
+                AST::ASTNode::StringConstant(string_constant) => {
+                    // Create a global string constant and pass its address
+                    let str_name = format!(".str_{}", self.program_ir.globals.len());
+                    let mut bytes: Vec<i8> = string_constant
+                        .value
+                        .as_bytes()
+                        .iter()
+                        .map(|b| *b as i8)
+                        .collect();
+                    bytes.push(0);
+                    self.program_ir.globals.push(GlobalDecl {
+                        sym: Symbol(str_name.clone()),
+                        kind: GlobalKind::GlobalStr { bytes },
+                    });
+                    let str_addr = self.new_value(Type::Ptr(Box::new(Type::I8)), &str_name);
+                    self.emit_instr(
+                        vec![str_addr],
+                        InstrKind::GlobalStrAddr {
+                            sym: Symbol(str_name),
+                        },
+                    );
+                    arg_values.push(str_addr);
+                }
+                // Regular expression arguments
+                _ => {
+                    self.visit_expression(arg);
+                    arg_values.push(self.get_result_value_id());
+                }
+            }
+        }
+
+        // Emit the call instruction
+        let mem_in = self.cur_mem;
+        let mem_out = self.new_value(Type::Mem, "");
+
+        let is_void = ret_ty == Type::Void;
+        let instr_kind = if is_imported {
+            InstrKind::CallImport {
+                mem: mem_in,
+                callee: Symbol(method_name),
+                args: arg_values,
+                ret_ty: ret_ty.clone(),
+            }
+        } else {
+            InstrKind::Call {
+                mem: mem_in,
+                callee: Symbol(method_name),
+                args: arg_values,
+                ret_ty: ret_ty.clone(),
+            }
+        };
+
+        if is_void {
+            self.emit_instr(vec![mem_out], instr_kind);
+        } else {
+            let ret_val = self.new_value(ret_ty, "call");
+            self.emit_instr(vec![mem_out, ret_val], instr_kind);
+            self.set_result_value_id(ret_val);
+        }
+        self.cur_mem = mem_out;
+    }
 
     fn visit_len_call(&mut self, _len_call: &AST::LenCall) {}
 

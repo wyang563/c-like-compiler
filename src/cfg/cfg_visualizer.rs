@@ -171,6 +171,7 @@ fn format_value_id(v: &ValueId) -> String {
 fn format_type(ty: &Type) -> String {
     match ty {
         Type::I1 => "i1".into(),
+        Type::I8 => "i8".into(),
         Type::I32 => "i32".into(),
         Type::I64 => "i64".into(),
         Type::Ptr(inner) => format!("ptr<{}>", format_type(inner)),

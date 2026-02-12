@@ -13,6 +13,7 @@ pub struct BlockId(pub u32);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     I1,
+    I8,
     I32,
     I64,
     Ptr(Box<Type>),
