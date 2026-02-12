@@ -25,7 +25,8 @@ struct ShortCircuitCtx {
     merge_bb: BlockId,
     short_circuit_val: ValueId,             // false for &&, true for ||
     op: String,                             // "&&" or "||"
-    phi_incomings: Vec<(BlockId, ValueId)>, // accumulated short-circuit edges
+    phi_incomings: Vec<(BlockId, ValueId)>, // accumulated short-circuit edges (bool)
+    mem_phi_incomings: Vec<(BlockId, ValueId)>, // accumulated short-circuit edges (mem)
 }
 
 #[allow(non_camel_case_types)]
@@ -1037,6 +1038,7 @@ impl Visitor for SSA_CFG_Compiler {
                         short_circuit_val: sc_val,
                         op: op.to_string(),
                         phi_incomings: vec![],
+                        mem_phi_incomings: vec![],
                     });
                     (merge_bb_id, sc_val, Some(prev_ctx))
                 };
@@ -1062,11 +1064,10 @@ impl Visitor for SSA_CFG_Compiler {
                 };
                 self.add_predecessor(rhs_bb_id, lhs_block_id);
                 self.add_predecessor(merge_bb, lhs_block_id);
-                self.short_circuit_ctx
-                    .as_mut()
-                    .unwrap()
-                    .phi_incomings
-                    .push((lhs_block_id, sc_val));
+                let sc_mem = self.cur_mem;
+                let ctx = self.short_circuit_ctx.as_mut().unwrap();
+                ctx.phi_incomings.push((lhs_block_id, sc_val));
+                ctx.mem_phi_incomings.push((lhs_block_id, sc_mem));
 
                 // Evaluate RHS
                 self.start_block_with_id(rhs_bb_id);
@@ -1077,6 +1078,7 @@ impl Visitor for SSA_CFG_Compiler {
                 if let Some(prev_ctx) = prev_ctx {
                     // Outermost: finalize merge block and phi
                     let rhs_block_id = self.current_block_id();
+                    let rhs_mem = self.cur_mem;
                     let mem = self.new_value(Type::Mem, "");
                     self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term =
                         Terminator::Br {
@@ -1085,11 +1087,16 @@ impl Visitor for SSA_CFG_Compiler {
                         };
                     self.add_predecessor(merge_bb, rhs_block_id);
 
-                    let mut phi_incomings = self.short_circuit_ctx.take().unwrap().phi_incomings;
+                    let sc_ctx = self.short_circuit_ctx.take().unwrap();
+                    let mut phi_incomings = sc_ctx.phi_incomings;
+                    let mut mem_phi_incomings = sc_ctx.mem_phi_incomings;
                     phi_incomings.push((rhs_block_id, rhs_val));
+                    mem_phi_incomings.push((rhs_block_id, rhs_mem));
 
                     self.short_circuit_ctx = prev_ctx; // Restore
                     self.start_block_with_id(merge_bb);
+
+                    // Boolean result phi
                     let phi_result = self.new_value(Type::I1, "logic");
                     self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
                         .phis
@@ -1098,6 +1105,18 @@ impl Visitor for SSA_CFG_Compiler {
                             ty: Type::I1,
                             incomings: phi_incomings,
                         });
+
+                    // Memory phi to merge memory tokens from all paths
+                    let mem_phi_result = self.new_value(Type::Mem, "");
+                    self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+                        .phis
+                        .push(Phi {
+                            result: mem_phi_result,
+                            ty: Type::Mem,
+                            incomings: mem_phi_incomings,
+                        });
+                    self.cur_mem = mem_phi_result;
+
                     self.set_result_value_id(phi_result);
                 } else {
                     // Nested: just return RHS value
