@@ -3,7 +3,7 @@ use super::super::parser::AST;
 use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
 use super::three_address_code::{
     BasicBlock, BinOp, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ICmpPred, Instr,
-    InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, ValueId, ValueInfo,
+    InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -815,7 +815,51 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_long_cast(&mut self, _long_cast: &AST::LongCast) {}
 
-    fn visit_unary_expression(&mut self, _unary_expression: &AST::UnaryExpression) {}
+    fn visit_unary_expression(&mut self, unary_expression: &AST::UnaryExpression) {
+        let op = unary_expression.op.as_str();
+
+        self.visit_expression(&unary_expression.expr);
+        let arg_val = self.get_result_value_id();
+
+        let operand_ty = self.cur_func.as_ref().unwrap().values[&arg_val].ty.clone();
+
+        match op {
+            // Negation operator (works on int and long)
+            "-" => {
+                let unary_op = UnOp::Neg;
+                let result = self.new_value(operand_ty.clone(), "neg");
+                self.emit_instr(
+                    vec![result],
+                    InstrKind::UnOp {
+                        op: unary_op,
+                        ty: operand_ty,
+                        arg: arg_val,
+                    },
+                );
+                self.set_result_value_id(result);
+            }
+
+            // Logical NOT operator (works on bool)
+            "!" => {
+                let unary_op = UnOp::Not;
+                let result = self.new_value(Type::I1, "not");
+                self.emit_instr(
+                    vec![result],
+                    InstrKind::UnOp {
+                        op: unary_op,
+                        ty: Type::I1,
+                        arg: arg_val,
+                    },
+                );
+                self.set_result_value_id(result);
+            }
+
+            _ => {
+                eprintln!("Error: unknown unary operator '{}'", op);
+                panic!();
+            }
+        }
+    }
 
     fn visit_binary_expression(&mut self, binary_expression: &AST::BinaryExpression) {
         let op = binary_expression.op.as_str();
