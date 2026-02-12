@@ -2,8 +2,8 @@ use super::super::parser::visitor::Visitor;
 use super::super::parser::AST;
 use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
 use super::three_address_code::{
-    BasicBlock, BinOp, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, Instr, InstrKind,
-    ProgramIR, Symbol, Terminator, Type, ValueId, ValueInfo,
+    BasicBlock, BinOp, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ICmpPred, Instr,
+    InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, ValueId, ValueInfo,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -14,6 +14,18 @@ pub struct LoopContext {
     pub header_block: BlockId,
     pub exit_block: BlockId,
     pub continue_target: BlockId,
+}
+
+/// Context for flattening chains of the same logical operator (&&/||).
+/// When a nested && (or ||) sees an existing context with the same op,
+/// it short-circuits directly to the outermost merge block instead of
+/// creating its own intermediate merge.
+#[derive(Clone, Debug)]
+struct ShortCircuitCtx {
+    merge_bb: BlockId,
+    short_circuit_val: ValueId,             // false for &&, true for ||
+    op: String,                             // "&&" or "||"
+    phi_incomings: Vec<(BlockId, ValueId)>, // accumulated short-circuit edges
 }
 
 #[allow(non_camel_case_types)]
@@ -61,6 +73,9 @@ pub struct SSA_CFG_Compiler {
 
     // ==================== Flags ====================
     init_method: bool, // True when initializing a method (for parameter handling)
+
+    // ==================== Short-Circuit Context ====================
+    short_circuit_ctx: Option<ShortCircuitCtx>,
 }
 
 impl SSA_CFG_Compiler {
@@ -802,7 +817,174 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_unary_expression(&mut self, _unary_expression: &AST::UnaryExpression) {}
 
-    fn visit_binary_expression(&mut self, _binary_expression: &AST::BinaryExpression) {}
+    fn visit_binary_expression(&mut self, binary_expression: &AST::BinaryExpression) {
+        let op = binary_expression.op.as_str();
+
+        match op {
+            // Arithmetic operators
+            "+" | "-" | "*" | "/" | "%" => {
+                self.visit_expression(&binary_expression.left_expr);
+                let lhs_val = self.get_result_value_id();
+
+                self.visit_expression(&binary_expression.right_expr);
+                let rhs_val = self.get_result_value_id();
+
+                let operand_ty = self.cur_func.as_ref().unwrap().values[&lhs_val].ty.clone();
+
+                let bin_op = match op {
+                    "+" => BinOp::Add,
+                    "-" => BinOp::Sub,
+                    "*" => BinOp::Mul,
+                    "/" => BinOp::SDiv,
+                    "%" => BinOp::SRem,
+                    _ => unreachable!(),
+                };
+
+                let result = self.new_value(operand_ty.clone(), "binop");
+                self.emit_instr(
+                    vec![result],
+                    InstrKind::BinOp {
+                        op: bin_op,
+                        ty: operand_ty,
+                        lhs: lhs_val,
+                        rhs: rhs_val,
+                    },
+                );
+                self.set_result_value_id(result);
+            }
+
+            // Comparison operators
+            "<" | "<=" | ">" | ">=" | "==" | "!=" => {
+                self.visit_expression(&binary_expression.left_expr);
+                let lhs_val = self.get_result_value_id();
+
+                self.visit_expression(&binary_expression.right_expr);
+                let rhs_val = self.get_result_value_id();
+
+                let operand_ty = self.cur_func.as_ref().unwrap().values[&lhs_val].ty.clone();
+
+                let pred = match op {
+                    "<" => ICmpPred::Lt,
+                    "<=" => ICmpPred::Le,
+                    ">" => ICmpPred::Gt,
+                    ">=" => ICmpPred::Ge,
+                    "==" => ICmpPred::Eq,
+                    "!=" => ICmpPred::Ne,
+                    _ => unreachable!(),
+                };
+
+                let result = self.new_value(Type::I1, "cmp");
+                self.emit_instr(
+                    vec![result],
+                    InstrKind::ICmp {
+                        pred,
+                        ty: operand_ty,
+                        lhs: lhs_val,
+                        rhs: rhs_val,
+                    },
+                );
+                self.set_result_value_id(result);
+            }
+
+            // Logical operators with short-circuit evaluation.
+            // Chains of the same operator (e.g. a && b && c) are flattened:
+            // all short-circuit exits jump directly to a single merge block.
+            "&&" | "||" => {
+                let is_and = op == "&&";
+                let is_nested = matches!(&self.short_circuit_ctx, Some(ctx) if ctx.op == op);
+
+                // Setup: determine merge block, short-circuit value, and save prev context
+                let (merge_bb, sc_val, prev_ctx) = if is_nested {
+                    // Nested: reuse outer context
+                    let ctx = self.short_circuit_ctx.as_ref().unwrap();
+                    (ctx.merge_bb, ctx.short_circuit_val, None)
+                } else {
+                    // Outermost: create new context
+                    let merge_bb_id = BlockId(self.get_next_block_id());
+                    let sc_const = ConstValue::I1(!is_and); // false for &&, true for ||
+                    let sc_val = self.new_value(Type::I1, "short_circuit");
+                    self.emit_instr(vec![sc_val], InstrKind::Const(sc_const));
+
+                    let prev_ctx = self.short_circuit_ctx.take();
+                    self.short_circuit_ctx = Some(ShortCircuitCtx {
+                        merge_bb: merge_bb_id,
+                        short_circuit_val: sc_val,
+                        op: op.to_string(),
+                        phi_incomings: vec![],
+                    });
+                    (merge_bb_id, sc_val, Some(prev_ctx))
+                };
+
+                // Evaluate LHS and emit conditional branch
+                self.visit_expression(&binary_expression.left_expr);
+                let lhs_val = self.get_result_value_id();
+                let lhs_block_id = self.current_block_id();
+
+                let rhs_bb_id = BlockId(self.get_next_block_id());
+                let (then_bb, else_bb) = if is_and {
+                    (rhs_bb_id, merge_bb) // &&: true→RHS, false→merge
+                } else {
+                    (merge_bb, rhs_bb_id) // ||: true→merge, false→RHS
+                };
+
+                let mem = self.new_value(Type::Mem, "");
+                self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
+                    mem,
+                    cond: lhs_val,
+                    then_bb,
+                    else_bb,
+                };
+                self.add_predecessor(rhs_bb_id, lhs_block_id);
+                self.add_predecessor(merge_bb, lhs_block_id);
+                self.short_circuit_ctx
+                    .as_mut()
+                    .unwrap()
+                    .phi_incomings
+                    .push((lhs_block_id, sc_val));
+
+                // Evaluate RHS
+                self.start_block_with_id(rhs_bb_id);
+                self.visit_expression(&binary_expression.right_expr);
+                let rhs_val = self.get_result_value_id();
+
+                // Finalize: outermost creates merge block, nested just returns
+                if let Some(prev_ctx) = prev_ctx {
+                    // Outermost: finalize merge block and phi
+                    let rhs_block_id = self.current_block_id();
+                    let mem = self.new_value(Type::Mem, "");
+                    self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term =
+                        Terminator::Br {
+                            mem,
+                            target: merge_bb,
+                        };
+                    self.add_predecessor(merge_bb, rhs_block_id);
+
+                    let mut phi_incomings = self.short_circuit_ctx.take().unwrap().phi_incomings;
+                    phi_incomings.push((rhs_block_id, rhs_val));
+
+                    self.short_circuit_ctx = prev_ctx; // Restore
+                    self.start_block_with_id(merge_bb);
+                    let phi_result = self.new_value(Type::I1, "logic");
+                    self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+                        .phis
+                        .push(Phi {
+                            result: phi_result,
+                            ty: Type::I1,
+                            incomings: phi_incomings,
+                        });
+                    self.set_result_value_id(phi_result);
+                } else {
+                    // Nested: just return RHS value
+                    self.set_result_value_id(rhs_val);
+                }
+            }
+
+            _ => {
+                eprintln!("Error: unknown binary operator '{}'", op);
+                panic!();
+            }
+        }
+    }
 
     fn visit_index_expression(&mut self, index_expression: &AST::IndexExpression) {
         let array_name = index_expression.id.name.as_str();
@@ -1118,6 +1300,9 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
 
         // Flags
         init_method: false,
+
+        // Short-circuit context
+        short_circuit_ctx: None,
     };
     ssa_cfg_compiler.visit_program(&ast);
 
