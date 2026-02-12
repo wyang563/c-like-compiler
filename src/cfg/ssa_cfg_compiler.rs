@@ -2,8 +2,8 @@ use super::super::parser::visitor::Visitor;
 use super::super::parser::AST;
 use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
 use super::three_address_code::{
-    BasicBlock, BinOp, BlockId, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ICmpPred, Instr,
-    InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
+    BasicBlock, BinOp, BlockId, CastKind, ConstValue, FunctionIR, GlobalDecl, GlobalKind,
+    ICmpPred, Instr, InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -904,9 +904,51 @@ impl Visitor for SSA_CFG_Compiler {
         self.set_result_value_id(result);
     }
 
-    fn visit_int_cast(&mut self, _int_cast: &AST::IntCast) {}
+    fn visit_int_cast(&mut self, int_cast: &AST::IntCast) {
+        self.visit_expression(&int_cast.cast_expr);
+        let src = self.get_result_value_id();
+        let src_ty = self.cur_func.as_ref().unwrap().values[&src].ty.clone();
 
-    fn visit_long_cast(&mut self, _long_cast: &AST::LongCast) {}
+        let kind = match src_ty {
+            Type::I32 => {
+                // int(int) is a no-op
+                self.set_result_value_id(src);
+                return;
+            }
+            Type::I64 => CastKind::I64ToI32,
+            _ => {
+                eprintln!("Error: int() cast on non-numeric type");
+                panic!();
+            }
+        };
+
+        let result = self.new_value(Type::I32, "cast");
+        self.emit_instr(vec![result], InstrKind::Cast { kind, src });
+        self.set_result_value_id(result);
+    }
+
+    fn visit_long_cast(&mut self, long_cast: &AST::LongCast) {
+        self.visit_expression(&long_cast.cast_expr);
+        let src = self.get_result_value_id();
+        let src_ty = self.cur_func.as_ref().unwrap().values[&src].ty.clone();
+
+        let kind = match src_ty {
+            Type::I64 => {
+                // long(long) is a no-op
+                self.set_result_value_id(src);
+                return;
+            }
+            Type::I32 => CastKind::I32ToI64,
+            _ => {
+                eprintln!("Error: long() cast on non-numeric type");
+                panic!();
+            }
+        };
+
+        let result = self.new_value(Type::I64, "cast");
+        self.emit_instr(vec![result], InstrKind::Cast { kind, src });
+        self.set_result_value_id(result);
+    }
 
     fn visit_unary_expression(&mut self, unary_expression: &AST::UnaryExpression) {
         let op = unary_expression.op.as_str();
