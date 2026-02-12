@@ -892,7 +892,17 @@ impl Visitor for SSA_CFG_Compiler {
         self.cur_mem = mem_out;
     }
 
-    fn visit_len_call(&mut self, _len_call: &AST::LenCall) {}
+    fn visit_len_call(&mut self, len_call: &AST::LenCall) {
+        let array_name = len_call.id.name.as_str();
+        let result = self.new_value(Type::I32, "len");
+        self.emit_instr(
+            vec![result],
+            InstrKind::Len {
+                sym: Symbol(array_name.to_string()),
+            },
+        );
+        self.set_result_value_id(result);
+    }
 
     fn visit_int_cast(&mut self, _int_cast: &AST::IntCast) {}
 

@@ -358,6 +358,9 @@ fn format_instr_kind(kind: &InstrKind) -> String {
                 format_value_id(mem)
             )
         }
+        InstrKind::Len { sym } => {
+            format!("len @{}", sym.0)
+        }
     }
 }
 

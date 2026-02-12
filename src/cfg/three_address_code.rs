@@ -167,6 +167,10 @@ pub enum InstrKind {
     /// Same as Call, but explicitly marks "import" calls (per Decaf spec).
     /// Typically returns i32 (per spec) and may accept string literals / arrays.
     CallImport { mem: ValueId, callee: Symbol, args: Vec<ValueId>, ret_ty: Type },
+
+    // Returns the compile-time length of an array as i32.
+    // %v:i32 = len @arr
+    Len { sym: Symbol },
 }
 
 #[derive(Clone, Debug)]
