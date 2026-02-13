@@ -243,7 +243,6 @@ fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> 
             };
             format!("const_{} {}", ty, format_const_value(cv))
         }
-        InstrKind::Copy { src } => format!("copy {}", format_value_named(src, values)),
         InstrKind::BinOp { op, ty, lhs, rhs } => {
             let op_name = match op {
                 BinOp::Add => "add",
@@ -265,7 +264,12 @@ fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> 
                 UnOp::Neg => "neg",
                 UnOp::Not => "not",
             };
-            format!("{}_{} {}", op_name, format_type(ty), format_value_named(arg, values))
+            format!(
+                "{}_{} {}",
+                op_name,
+                format_type(ty),
+                format_value_named(arg, values)
+            )
         }
         InstrKind::ICmp { pred, ty, lhs, rhs } => {
             let pred_name = match pred {
@@ -288,8 +292,6 @@ fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> 
             let cast_name = match kind {
                 CastKind::I32ToI64 => "i32_to_i64",
                 CastKind::I64ToI32 => "i64_to_i32",
-                CastKind::I1ToI32 => "i1_to_i32",
-                CastKind::I1ToI64 => "i1_to_i64",
             };
             format!("cast_{} {}", cast_name, format_value_named(src, values))
         }
@@ -389,7 +391,9 @@ pub(super) fn format_terminator(term: &Terminator, values: &HashMap<ValueId, Val
             else_bb.0,
             format_value_named(mem, values)
         ),
-        Terminator::RetVoid { mem } => format!("ret void [mem {}]", format_value_named(mem, values)),
+        Terminator::RetVoid { mem } => {
+            format!("ret void [mem {}]", format_value_named(mem, values))
+        }
         Terminator::Ret { mem, value } => {
             format!(
                 "ret {} [mem {}]",

@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 /// Used by break/continue to determine jump targets
 #[derive(Clone, Debug)]
 pub struct LoopContext {
+    #[allow(dead_code)]
     pub header_block: BlockId,
     pub exit_block: BlockId,
     pub continue_target: BlockId,
@@ -136,11 +137,13 @@ impl SSA_CFG_Compiler {
     // ==================== Loop Context Methods ====================
 
     /// Get the current loop context (panics if not in a loop)
+    #[allow(dead_code)]
     fn current_loop_context(&self) -> &LoopContext {
         self.loop_stack.last().expect("Not inside a loop")
     }
 
     /// Check if we're currently inside a loop
+    #[allow(dead_code)]
     fn is_in_loop(&self) -> bool {
         !self.loop_stack.is_empty()
     }

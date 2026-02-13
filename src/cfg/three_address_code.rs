@@ -121,12 +121,6 @@ pub enum InstrKind {
     // %v:i32 = const_i32 42
     Const(ConstValue),
 
-    // Returns a copy of a source value
-    // %v4:i32 = copy %v1
-    Copy {
-        src: ValueId,
-    },
-
     // Binary op for input registers lhs, rhs with type ty and operation op
     // %v3:i32 = add_i32 %v1, %v2
     BinOp {
@@ -270,8 +264,6 @@ pub enum ICmpPred {
 pub enum CastKind {
     I32ToI64,
     I64ToI32,
-    I1ToI32,
-    I1ToI64,
 }
 
 // -----------------------------
