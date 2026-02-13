@@ -689,15 +689,20 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_if_statement(&mut self, if_statement: &AST::IfStatement) {
         let entry_block_id = self.current_block_id();
+        let has_else = if_statement.else_block.as_ref().is_some();
 
         // Evaluate the condition expression in the current block
         self.visit_expression(&if_statement.condition);
         let cond_value = self.get_result_value_id();
 
+        // Snapshot entry state for phi construction at merge
+        let entry_mem = self.cur_mem;
+        let entry_vars = self.snapshot_vars();
+
         // Pre-allocate block IDs for then, else (if needed), and merge blocks
         let then_bb_id = BlockId(self.get_next_block_id());
         let merge_bb_id = BlockId(self.get_next_block_id());
-        let else_bb_id = if if_statement.else_block.as_ref().is_some() {
+        let else_bb_id = if has_else {
             BlockId(self.get_next_block_id())
         } else {
             merge_bb_id // If no else clause, false branch goes directly to merge
@@ -712,47 +717,103 @@ impl Visitor for SSA_CFG_Compiler {
             else_bb: else_bb_id,
         };
 
-        // Record predecessor edges for phi insertion later
+        // Record predecessor edges
         self.add_predecessor(then_bb_id, entry_block_id);
-        if if_statement.else_block.as_ref().is_some() {
+        if has_else {
             self.add_predecessor(else_bb_id, entry_block_id);
         } else {
-            // If no else, entry goes directly to merge on false branch
             self.add_predecessor(merge_bb_id, entry_block_id);
         }
 
-        // Create and visit the 'then' block
+        // ── Then block ──
         self.start_block_with_id(then_bb_id);
         self.visit_block(if_statement.then_block.as_ref());
 
-        // Terminate then block with jump to merge (if not already terminated by return/break)
-        if self.is_terminator_unreachable() {
+        let then_fell_through = self.is_terminator_unreachable();
+        let then_end_block_id = self.current_block_id();
+        let then_end_mem = self.cur_mem;
+        let then_end_vars = self.snapshot_vars();
+
+        if then_fell_through {
             let mem = self.new_value(Type::Mem, "");
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
                 mem,
                 target: merge_bb_id,
             };
-            self.add_predecessor(merge_bb_id, then_bb_id);
+            self.add_predecessor(merge_bb_id, then_end_block_id);
         }
 
-        // Create and visit the 'else' block if it exists
+        // Restore entry state before visiting else so it sees pre-if values
+        self.cur_mem = entry_mem;
+        for (scope_ind, var_name, val) in &entry_vars {
+            self.var_to_value_id
+                .get_mut(scope_ind)
+                .unwrap()
+                .insert(var_name.clone(), *val);
+        }
+
+        // ── Else block (or implicit false-branch from entry) ──
+        let else_fell_through: bool;
+        let else_end_block_id: BlockId;
+        let else_end_mem: ValueId;
+        let else_end_vars: Vec<(usize, String, ValueId)>;
+
         if let Some(else_block) = if_statement.else_block.as_ref().as_ref() {
             self.start_block_with_id(else_bb_id);
             self.visit_block(else_block);
 
-            // Terminate else block with jump to merge (if not already terminated)
-            if self.is_terminator_unreachable() {
+            else_fell_through = self.is_terminator_unreachable();
+            else_end_block_id = self.current_block_id();
+            else_end_mem = self.cur_mem;
+            else_end_vars = self.snapshot_vars();
+
+            if else_fell_through {
                 let mem = self.new_value(Type::Mem, "");
                 self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
                     mem,
                     target: merge_bb_id,
                 };
-                self.add_predecessor(merge_bb_id, else_bb_id);
+                self.add_predecessor(merge_bb_id, else_end_block_id);
             }
+        } else {
+            // No else: false branch flows directly from entry to merge
+            else_fell_through = true;
+            else_end_block_id = entry_block_id;
+            else_end_mem = entry_mem;
+            else_end_vars = entry_vars.clone();
         }
 
-        // Create the merge block and continue execution there
+        // ── Merge block with phi insertion ──
         self.start_block_with_id(merge_bb_id);
+
+        let mut merge_incomings: Vec<(BlockId, ValueId, Vec<(usize, String, ValueId)>)> = vec![];
+        if then_fell_through {
+            merge_incomings.push((then_end_block_id, then_end_mem, then_end_vars));
+        }
+        if else_fell_through {
+            merge_incomings.push((else_end_block_id, else_end_mem, else_end_vars));
+        }
+
+        match merge_incomings.len() {
+            0 => {
+                // Both branches terminated (return/break/continue) — merge is unreachable
+            }
+            1 => {
+                // Only one branch falls through — no phi needed, just restore that branch's state
+                let (_, mem, vars) = &merge_incomings[0];
+                self.cur_mem = *mem;
+                for (scope_ind, var_name, val) in vars {
+                    self.var_to_value_id
+                        .get_mut(scope_ind)
+                        .unwrap()
+                        .insert(var_name.clone(), *val);
+                }
+            }
+            _ => {
+                // Both branches fall through — create phis to merge variable states
+                self.emit_merge_phis(&entry_vars, &merge_incomings);
+            }
+        }
     }
 
     fn visit_for_statement(&mut self, for_statement: &AST::ForStatement) {
@@ -1991,9 +2052,6 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
         short_circuit_ctx: None,
     };
     ssa_cfg_compiler.visit_program(&ast);
-
-    // TODO: Pass 2 - phi node insertion and variable renaming
-    // insert_phi_nodes(&mut ssa_cfg_compiler.program_ir);
 
     return ssa_cfg_compiler.program_ir;
 }
