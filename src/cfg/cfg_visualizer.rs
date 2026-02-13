@@ -32,7 +32,7 @@ fn visualize_function_ir(output: &mut String, func: &FunctionIR) {
     let params_str = func
         .params
         .iter()
-        .map(|p| format_value_id(p))
+        .map(|p| format_value_named(p, &func.values))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -97,10 +97,10 @@ fn render_block(output: &mut String, block: &BasicBlock, values: &HashMap<ValueI
 
     // phi nodes
     if let Some(mem_phi) = &block.mem_in {
-        body_lines.push(format_phi(mem_phi));
+        body_lines.push(format_phi(mem_phi, values));
     }
     for phi in &block.phis {
-        body_lines.push(format_phi(phi));
+        body_lines.push(format_phi(phi, values));
     }
 
     // instructions
@@ -108,7 +108,7 @@ fn render_block(output: &mut String, block: &BasicBlock, values: &HashMap<ValueI
         body_lines.push(format_instr(instr, values));
     }
 
-    let term_line = format_terminator(&block.term);
+    let term_line = format_terminator(&block.term, values);
 
     // box width
     let block_label = format!("B{}", block.id.0);
@@ -168,6 +168,14 @@ fn format_value_id(v: &ValueId) -> String {
     format!("%v{}", v.0)
 }
 
+fn format_value_named(v: &ValueId, values: &HashMap<ValueId, ValueInfo>) -> String {
+    let base = format_value_id(v);
+    match values.get(v) {
+        Some(info) if !info.org_name.is_empty() => format!("{}«{}»", base, info.org_name),
+        _ => base,
+    }
+}
+
 fn format_type(ty: &Type) -> String {
     match ty {
         Type::I1 => "i1".into(),
@@ -189,15 +197,15 @@ fn format_const_value(cv: &ConstValue) -> String {
     }
 }
 
-fn format_phi(phi: &Phi) -> String {
+fn format_phi(phi: &Phi, values: &HashMap<ValueId, ValueInfo>) -> String {
     let incomings: Vec<String> = phi
         .incomings
         .iter()
-        .map(|(bid, vid)| format!("[B{}: {}]", bid.0, format_value_id(vid)))
+        .map(|(bid, vid)| format!("[B{}: {}]", bid.0, format_value_named(vid, values)))
         .collect();
     format!(
         "{}:{} = phi {}",
-        format_value_id(&phi.result),
+        format_value_named(&phi.result, values),
         format_type(&phi.ty),
         incomings.join(", ")
     )
@@ -215,17 +223,17 @@ fn format_instr(instr: &Instr, values: &HashMap<ValueId, ValueInfo>) -> String {
                     .get(v)
                     .map(|info| format_type(&info.ty))
                     .unwrap_or_else(|| "?".into());
-                format!("{}:{}", format_value_id(v), ty_str)
+                format!("{}:{}", format_value_named(v, values), ty_str)
             })
             .collect();
         format!("{} = ", parts.join(", "))
     };
 
-    let kind_str = format_instr_kind(&instr.kind);
+    let kind_str = format_instr_kind(&instr.kind, values);
     format!("{}{}", results_str, kind_str)
 }
 
-fn format_instr_kind(kind: &InstrKind) -> String {
+fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> String {
     match kind {
         InstrKind::Const(cv) => {
             let ty = match cv {
@@ -235,7 +243,7 @@ fn format_instr_kind(kind: &InstrKind) -> String {
             };
             format!("const_{} {}", ty, format_const_value(cv))
         }
-        InstrKind::Copy { src } => format!("copy {}", format_value_id(src)),
+        InstrKind::Copy { src } => format!("copy {}", format_value_named(src, values)),
         InstrKind::BinOp { op, ty, lhs, rhs } => {
             let op_name = match op {
                 BinOp::Add => "add",
@@ -248,8 +256,8 @@ fn format_instr_kind(kind: &InstrKind) -> String {
                 "{}_{} {}, {}",
                 op_name,
                 format_type(ty),
-                format_value_id(lhs),
-                format_value_id(rhs)
+                format_value_named(lhs, values),
+                format_value_named(rhs, values)
             )
         }
         InstrKind::UnOp { op, ty, arg } => {
@@ -257,7 +265,7 @@ fn format_instr_kind(kind: &InstrKind) -> String {
                 UnOp::Neg => "neg",
                 UnOp::Not => "not",
             };
-            format!("{}_{} {}", op_name, format_type(ty), format_value_id(arg))
+            format!("{}_{} {}", op_name, format_type(ty), format_value_named(arg, values))
         }
         InstrKind::ICmp { pred, ty, lhs, rhs } => {
             let pred_name = match pred {
@@ -272,8 +280,8 @@ fn format_instr_kind(kind: &InstrKind) -> String {
                 "icmp_{}_{} {}, {}",
                 pred_name,
                 format_type(ty),
-                format_value_id(lhs),
-                format_value_id(rhs)
+                format_value_named(lhs, values),
+                format_value_named(rhs, values)
             )
         }
         InstrKind::Cast { kind, src } => {
@@ -283,7 +291,7 @@ fn format_instr_kind(kind: &InstrKind) -> String {
                 CastKind::I1ToI32 => "i1_to_i32",
                 CastKind::I1ToI64 => "i1_to_i64",
             };
-            format!("cast_{} {}", cast_name, format_value_id(src))
+            format!("cast_{} {}", cast_name, format_value_named(src, values))
         }
         InstrKind::GlobalAddr { sym, ty } => {
             format!("global_addr @{} : {}", sym.0, format_type(ty))
@@ -299,14 +307,14 @@ fn format_instr_kind(kind: &InstrKind) -> String {
         } => format!(
             "elem_addr {}, {}, {}",
             format_type(elem_ty),
-            format_value_id(base),
-            format_value_id(index)
+            format_value_named(base, values),
+            format_value_named(index, values)
         ),
         InstrKind::Load { ty, mem, addr } => format!(
             "load {}, {}, {}",
             format_type(ty),
-            format_value_id(mem),
-            format_value_id(addr)
+            format_value_named(mem, values),
+            format_value_named(addr, values)
         ),
         InstrKind::Store {
             ty,
@@ -316,9 +324,9 @@ fn format_instr_kind(kind: &InstrKind) -> String {
         } => format!(
             "store {}, {}, {}, {}",
             format_type(ty),
-            format_value_id(mem),
-            format_value_id(addr),
-            format_value_id(value)
+            format_value_named(mem, values),
+            format_value_named(addr, values),
+            format_value_named(value, values)
         ),
         InstrKind::Call {
             mem,
@@ -328,7 +336,7 @@ fn format_instr_kind(kind: &InstrKind) -> String {
         } => {
             let args_str = args
                 .iter()
-                .map(|a| format_value_id(a))
+                .map(|a| format_value_named(a, values))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -336,7 +344,7 @@ fn format_instr_kind(kind: &InstrKind) -> String {
                 callee.0,
                 args_str,
                 format_type(ret_ty),
-                format_value_id(mem)
+                format_value_named(mem, values)
             )
         }
         InstrKind::CallImport {
@@ -347,7 +355,7 @@ fn format_instr_kind(kind: &InstrKind) -> String {
         } => {
             let args_str = args
                 .iter()
-                .map(|a| format_value_id(a))
+                .map(|a| format_value_named(a, values))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -355,7 +363,7 @@ fn format_instr_kind(kind: &InstrKind) -> String {
                 callee.0,
                 args_str,
                 format_type(ret_ty),
-                format_value_id(mem)
+                format_value_named(mem, values)
             )
         }
         InstrKind::Len { sym } => {
@@ -364,10 +372,10 @@ fn format_instr_kind(kind: &InstrKind) -> String {
     }
 }
 
-fn format_terminator(term: &Terminator) -> String {
+fn format_terminator(term: &Terminator, values: &HashMap<ValueId, ValueInfo>) -> String {
     match term {
         Terminator::Br { mem, target } => {
-            format!("br B{} [mem {}]", target.0, format_value_id(mem))
+            format!("br B{} [mem {}]", target.0, format_value_named(mem, values))
         }
         Terminator::CBr {
             mem,
@@ -376,17 +384,17 @@ fn format_terminator(term: &Terminator) -> String {
             else_bb,
         } => format!(
             "cbr {}, B{}, B{} [mem {}]",
-            format_value_id(cond),
+            format_value_named(cond, values),
             then_bb.0,
             else_bb.0,
-            format_value_id(mem)
+            format_value_named(mem, values)
         ),
-        Terminator::RetVoid { mem } => format!("ret void [mem {}]", format_value_id(mem)),
+        Terminator::RetVoid { mem } => format!("ret void [mem {}]", format_value_named(mem, values)),
         Terminator::Ret { mem, value } => {
             format!(
                 "ret {} [mem {}]",
-                format_value_id(value),
-                format_value_id(mem)
+                format_value_named(value, values),
+                format_value_named(mem, values)
             )
         }
         Terminator::Unreachable => "unreachable".into(),

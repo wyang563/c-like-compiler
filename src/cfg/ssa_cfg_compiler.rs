@@ -416,6 +416,7 @@ impl Visitor for SSA_CFG_Compiler {
         };
 
         self.cur_func = Some(function_ir);
+        self.var_to_value_id.clear();
 
         // increment scope and add method args to new scope
         self.next_child_scope();
@@ -618,7 +619,175 @@ impl Visitor for SSA_CFG_Compiler {
         self.start_block_with_id(merge_bb_id);
     }
 
-    fn visit_for_statement(&mut self, _for_statement: &AST::ForStatement) {}
+    fn visit_for_statement(&mut self, for_statement: &AST::ForStatement) {
+        // Execute the init assignment in the current block
+        self.visit_assignment(&for_statement.start_assignment);
+
+        // Pre-allocate block IDs
+        let header_bb_id = BlockId(self.get_next_block_id());
+        let body_bb_id = BlockId(self.get_next_block_id());
+        let update_bb_id = BlockId(self.get_next_block_id());
+        let exit_bb_id = BlockId(self.get_next_block_id());
+
+        // Jump from current block to header
+        let entry_block_id = self.current_block_id();
+        let mem = self.new_value(Type::Mem, "");
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+            mem,
+            target: header_bb_id,
+        };
+        self.add_predecessor(header_bb_id, entry_block_id);
+
+        // Header block: evaluate condition
+        self.start_block_with_id(header_bb_id);
+
+        // Memory phi for the header (entry + back-edge from update)
+        let mem_phi_result = self.new_value(Type::Mem, "");
+        let entry_mem = self.cur_mem;
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+            .phis
+            .push(Phi {
+                result: mem_phi_result,
+                ty: Type::Mem,
+                incomings: vec![(entry_block_id, entry_mem)],
+            });
+        self.cur_mem = mem_phi_result;
+
+        // Variable phis for all local variables currently defined
+        let var_entries: Vec<(usize, String, ValueId)> = self
+            .var_to_value_id
+            .iter()
+            .flat_map(|(&scope_ind, scope_vars)| {
+                scope_vars
+                    .iter()
+                    .map(move |(name, &val)| (scope_ind, name.clone(), val))
+            })
+            .collect();
+
+        let mut var_phis: Vec<(usize, String, ValueId)> = vec![];
+        for (scope_ind, var_name, entry_val) in &var_entries {
+            let var_ty = self.cur_func.as_ref().unwrap().values[entry_val].ty.clone();
+            let phi_result = self.new_value(var_ty.clone(), var_name);
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+                .phis
+                .push(Phi {
+                    result: phi_result,
+                    ty: var_ty,
+                    incomings: vec![(entry_block_id, *entry_val)],
+                });
+            var_phis.push((*scope_ind, var_name.clone(), phi_result));
+        }
+        for (scope_ind, var_name, phi_result) in &var_phis {
+            self.var_to_value_id
+                .get_mut(scope_ind)
+                .unwrap()
+                .insert(var_name.clone(), *phi_result);
+        }
+
+        self.visit_expression(&for_statement.end_expr);
+        let cond_value = self.get_result_value_id();
+
+        // Conditional branch: true -> body, false -> exit
+        let mem = self.new_value(Type::Mem, "");
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
+            mem,
+            cond: cond_value,
+            then_bb: body_bb_id,
+            else_bb: exit_bb_id,
+        };
+        self.add_predecessor(body_bb_id, header_bb_id);
+        self.add_predecessor(exit_bb_id, header_bb_id);
+
+        // Body block
+        self.start_block_with_id(body_bb_id);
+
+        // Push loop context: continue jumps to update block, not header
+        self.loop_stack.push(LoopContext {
+            header_block: header_bb_id,
+            exit_block: exit_bb_id,
+            continue_target: update_bb_id,
+        });
+
+        self.visit_block(for_statement.block.as_ref());
+
+        self.loop_stack.pop();
+
+        // Jump from body end to update block
+        if self.is_terminator_unreachable() {
+            let body_end_block_id = self.current_block_id();
+            let mem = self.new_value(Type::Mem, "");
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+                mem,
+                target: update_bb_id,
+            };
+            self.add_predecessor(update_bb_id, body_end_block_id);
+        }
+
+        // Update block: execute the for-update, then jump back to header
+        self.start_block_with_id(update_bb_id);
+        match for_statement.update_expr.as_ref() {
+            AST::ASTNode::Assignment(assignment) => self.visit_assignment(assignment),
+            AST::ASTNode::MethodCall(method_call) => self.visit_method_call(method_call),
+            _ => {
+                eprintln!("Error: invalid for-update expression");
+                panic!();
+            }
+        }
+
+        // Back-edge: jump from update to header
+        if self.is_terminator_unreachable() {
+            let update_end_block_id = self.current_block_id();
+            let mem = self.new_value(Type::Mem, "");
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+                mem,
+                target: header_bb_id,
+            };
+            self.add_predecessor(header_bb_id, update_end_block_id);
+
+            // Patch the header's memory phi with the back-edge incoming
+            let update_end_mem = self.cur_mem;
+            let header_ind = *self
+                .cur_func
+                .as_ref()
+                .unwrap()
+                .block_id_to_ind
+                .get(&header_bb_id)
+                .unwrap();
+            self.cur_func.as_mut().unwrap().blocks[header_ind]
+                .phis
+                .iter_mut()
+                .find(|phi| phi.result == mem_phi_result)
+                .unwrap()
+                .incomings
+                .push((update_end_block_id, update_end_mem));
+
+            // Patch variable phis with the back-edge incomings
+            for (scope_ind, var_name, phi_result) in &var_phis {
+                let back_edge_val = *self
+                    .var_to_value_id
+                    .get(scope_ind)
+                    .and_then(|m| m.get(var_name.as_str()))
+                    .unwrap();
+                self.cur_func.as_mut().unwrap().blocks[header_ind]
+                    .phis
+                    .iter_mut()
+                    .find(|phi| phi.result == *phi_result)
+                    .unwrap()
+                    .incomings
+                    .push((update_end_block_id, back_edge_val));
+            }
+        }
+
+        // Exit block: restore var_to_value_id to phi results
+        for (scope_ind, var_name, phi_result) in &var_phis {
+            self.var_to_value_id
+                .get_mut(scope_ind)
+                .unwrap()
+                .insert(var_name.clone(), *phi_result);
+        }
+        self.start_block_with_id(exit_bb_id);
+        self.cur_mem = mem_phi_result;
+    }
 
     fn visit_while_statement(&mut self, while_statement: &AST::WhileStatement) {
         // Pre-allocate block IDs
