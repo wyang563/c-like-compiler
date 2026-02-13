@@ -2,8 +2,8 @@ use super::super::parser::visitor::Visitor;
 use super::super::parser::AST;
 use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
 use super::three_address_code::{
-    BasicBlock, BinOp, BlockId, CastKind, ConstValue, FunctionIR, GlobalDecl, GlobalKind,
-    ICmpPred, Instr, InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
+    BasicBlock, BinOp, BlockId, CastKind, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ICmpPred,
+    Instr, InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -620,18 +620,166 @@ impl Visitor for SSA_CFG_Compiler {
 
     fn visit_for_statement(&mut self, _for_statement: &AST::ForStatement) {}
 
-    fn visit_while_statement(&mut self, _while_statement: &AST::WhileStatement) {}
+    fn visit_while_statement(&mut self, while_statement: &AST::WhileStatement) {
+        // Pre-allocate block IDs
+        let header_bb_id = BlockId(self.get_next_block_id());
+        let body_bb_id = BlockId(self.get_next_block_id());
+        let exit_bb_id = BlockId(self.get_next_block_id());
+
+        // Jump from current block to header
+        let entry_block_id = self.current_block_id();
+        let mem = self.new_value(Type::Mem, "");
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+            mem,
+            target: header_bb_id,
+        };
+        self.add_predecessor(header_bb_id, entry_block_id);
+
+        // Header block: evaluate condition
+        self.start_block_with_id(header_bb_id);
+
+        // Memory phi for the header (entry + back-edge from body)
+        let mem_phi_result = self.new_value(Type::Mem, "");
+        let entry_mem = self.cur_mem;
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+            .phis
+            .push(Phi {
+                result: mem_phi_result,
+                ty: Type::Mem,
+                incomings: vec![(entry_block_id, entry_mem)],
+            });
+        self.cur_mem = mem_phi_result;
+
+        // Variable phis: for each local variable currently defined, create a phi
+        // so the header sees the updated value on back-edges from the body.
+        // We'll patch the back-edge incoming after visiting the body.
+        //
+        // Collect entries first to avoid borrowing self while mutating.
+        let var_entries: Vec<(usize, String, ValueId)> = self
+            .var_to_value_id
+            .iter()
+            .flat_map(|(&scope_ind, scope_vars)| {
+                scope_vars
+                    .iter()
+                    .map(move |(name, &val)| (scope_ind, name.clone(), val))
+            })
+            .collect();
+
+        let mut var_phis: Vec<(usize, String, ValueId)> = vec![]; // (scope_ind, var_name, phi_result)
+        for (scope_ind, var_name, entry_val) in &var_entries {
+            let var_ty = self.cur_func.as_ref().unwrap().values[entry_val].ty.clone();
+            let phi_result = self.new_value(var_ty.clone(), var_name);
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+                .phis
+                .push(Phi {
+                    result: phi_result,
+                    ty: var_ty,
+                    incomings: vec![(entry_block_id, *entry_val)],
+                });
+            var_phis.push((*scope_ind, var_name.clone(), phi_result));
+        }
+        // Update var_to_value_id to point to the phi results
+        for (scope_ind, var_name, phi_result) in &var_phis {
+            self.var_to_value_id
+                .get_mut(scope_ind)
+                .unwrap()
+                .insert(var_name.clone(), *phi_result);
+        }
+
+        self.visit_expression(&while_statement.condition);
+        let cond_value = self.get_result_value_id();
+
+        // Conditional branch: true -> body, false -> exit
+        let mem = self.new_value(Type::Mem, "");
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
+            mem,
+            cond: cond_value,
+            then_bb: body_bb_id,
+            else_bb: exit_bb_id,
+        };
+        self.add_predecessor(body_bb_id, header_bb_id);
+        self.add_predecessor(exit_bb_id, header_bb_id);
+
+        // Body block
+        self.start_block_with_id(body_bb_id);
+
+        // Push loop context for break/continue
+        self.loop_stack.push(LoopContext {
+            header_block: header_bb_id,
+            exit_block: exit_bb_id,
+            continue_target: header_bb_id,
+        });
+
+        self.visit_block(while_statement.block.as_ref());
+
+        self.loop_stack.pop();
+
+        // Back-edge: jump from end of body back to header
+        if self.is_terminator_unreachable() {
+            let body_end_block_id = self.current_block_id();
+            let mem = self.new_value(Type::Mem, "");
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+                mem,
+                target: header_bb_id,
+            };
+            self.add_predecessor(header_bb_id, body_end_block_id);
+
+            // Patch the header's memory phi with the back-edge incoming
+            let body_end_mem = self.cur_mem;
+            let header_ind = *self
+                .cur_func
+                .as_ref()
+                .unwrap()
+                .block_id_to_ind
+                .get(&header_bb_id)
+                .unwrap();
+            self.cur_func.as_mut().unwrap().blocks[header_ind]
+                .phis
+                .iter_mut()
+                .find(|phi| phi.result == mem_phi_result)
+                .unwrap()
+                .incomings
+                .push((body_end_block_id, body_end_mem));
+
+            // Patch variable phis with the back-edge incomings
+            for (scope_ind, var_name, phi_result) in &var_phis {
+                let back_edge_val = *self
+                    .var_to_value_id
+                    .get(scope_ind)
+                    .and_then(|m| m.get(var_name.as_str()))
+                    .unwrap();
+                self.cur_func.as_mut().unwrap().blocks[header_ind]
+                    .phis
+                    .iter_mut()
+                    .find(|phi| phi.result == *phi_result)
+                    .unwrap()
+                    .incomings
+                    .push((body_end_block_id, back_edge_val));
+            }
+        }
+
+        // Exit block: continue execution here.
+        // Restore var_to_value_id to the phi results — the exit block is a
+        // successor of the header, so variables should have the header phi values.
+        for (scope_ind, var_name, phi_result) in &var_phis {
+            self.var_to_value_id
+                .get_mut(scope_ind)
+                .unwrap()
+                .insert(var_name.clone(), *phi_result);
+        }
+        self.start_block_with_id(exit_bb_id);
+        self.cur_mem = mem_phi_result;
+    }
 
     fn visit_return_statement(&mut self, return_statement: &AST::ReturnStatement) {
         if let Some(expr) = return_statement.expr.as_ref().as_ref() {
             self.visit_expression(expr);
             let ret_val = self.get_result_value_id();
             let mem = self.cur_mem;
-            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term =
-                Terminator::Ret {
-                    mem,
-                    value: ret_val,
-                };
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Ret {
+                mem,
+                value: ret_val,
+            };
         } else {
             let mem = self.cur_mem;
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term =
