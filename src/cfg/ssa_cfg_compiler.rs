@@ -14,6 +14,10 @@ pub struct LoopContext {
     pub header_block: BlockId,
     pub exit_block: BlockId,
     pub continue_target: BlockId,
+    /// (from_block, mem_at_break, var_snapshot) for each break statement
+    pub break_edges: Vec<(BlockId, ValueId, Vec<(usize, String, ValueId)>)>,
+    /// (from_block, mem_at_continue, var_snapshot) for each continue statement
+    pub continue_edges: Vec<(BlockId, ValueId, Vec<(usize, String, ValueId)>)>,
 }
 
 /// Context for flattening chains of the same logical operator (&&/||).
@@ -375,6 +379,116 @@ impl SSA_CFG_Compiler {
             }
         }
     }
+
+    // ==================== Break/Continue & Phi Helpers ====================
+
+    /// Snapshot all current variable mappings into a flat vec.
+    fn snapshot_vars(&self) -> Vec<(usize, String, ValueId)> {
+        self.var_to_value_id
+            .iter()
+            .flat_map(|(&scope_ind, scope_vars)| {
+                scope_vars
+                    .iter()
+                    .map(move |(name, &val)| (scope_ind, name.clone(), val))
+            })
+            .collect()
+    }
+
+    /// Look up a variable's value in a snapshot by (scope_ind, var_name).
+    fn lookup_snapshot_var(
+        snapshot: &[(usize, String, ValueId)],
+        scope_ind: usize,
+        var_name: &str,
+    ) -> ValueId {
+        snapshot
+            .iter()
+            .find(|(s, n, _)| *s == scope_ind && n == var_name)
+            .map(|(_, _, v)| *v)
+            .unwrap()
+    }
+
+    /// Patch existing phis in `target_block` with additional incomings from edges.
+    /// `mem_phi_result` identifies the memory phi; `var_phis` identifies variable phis.
+    fn patch_phis_from_edges(
+        &mut self,
+        target_block: BlockId,
+        mem_phi_result: ValueId,
+        var_phis: &[(usize, String, ValueId)],
+        edges: &[(BlockId, ValueId, Vec<(usize, String, ValueId)>)],
+    ) {
+        let block_ind = *self
+            .cur_func
+            .as_ref()
+            .unwrap()
+            .block_id_to_ind
+            .get(&target_block)
+            .unwrap();
+        for (from_block, edge_mem, var_snapshot) in edges {
+            self.cur_func.as_mut().unwrap().blocks[block_ind]
+                .phis
+                .iter_mut()
+                .find(|phi| phi.result == mem_phi_result)
+                .unwrap()
+                .incomings
+                .push((*from_block, *edge_mem));
+
+            for (scope_ind, var_name, phi_result) in var_phis {
+                let val = Self::lookup_snapshot_var(var_snapshot, *scope_ind, var_name);
+                self.cur_func.as_mut().unwrap().blocks[block_ind]
+                    .phis
+                    .iter_mut()
+                    .find(|phi| phi.result == *phi_result)
+                    .unwrap()
+                    .incomings
+                    .push((*from_block, val));
+            }
+        }
+    }
+
+    /// Create new mem + variable phis at the current block from a list of incoming edges.
+    /// Updates `cur_mem` and `var_to_value_id` to the new phi results.
+    /// `var_phis` provides (scope_ind, var_name) to identify which variables need phis.
+    fn emit_merge_phis(
+        &mut self,
+        var_phis: &[(usize, String, ValueId)],
+        incomings: &[(BlockId, ValueId, Vec<(usize, String, ValueId)>)],
+    ) {
+        // Memory phi
+        let mem_incomings: Vec<(BlockId, ValueId)> =
+            incomings.iter().map(|(b, m, _)| (*b, *m)).collect();
+        let mem_phi = self.new_value(Type::Mem, "");
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+            .phis
+            .push(Phi {
+                result: mem_phi,
+                ty: Type::Mem,
+                incomings: mem_incomings,
+            });
+        self.cur_mem = mem_phi;
+
+        // Variable phis
+        for (scope_ind, var_name, _) in var_phis {
+            let var_incomings: Vec<(BlockId, ValueId)> = incomings
+                .iter()
+                .map(|(b, _, snap)| (*b, Self::lookup_snapshot_var(snap, *scope_ind, var_name)))
+                .collect();
+            let var_ty = self.cur_func.as_ref().unwrap().values[&var_incomings[0].1]
+                .ty
+                .clone();
+            let var_phi = self.new_value(var_ty.clone(), var_name);
+            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
+                .phis
+                .push(Phi {
+                    result: var_phi,
+                    ty: var_ty,
+                    incomings: var_incomings,
+                });
+            self.var_to_value_id
+                .get_mut(scope_ind)
+                .unwrap()
+                .insert(var_name.clone(), var_phi);
+        }
+    }
 }
 
 impl Visitor for SSA_CFG_Compiler {
@@ -672,15 +786,7 @@ impl Visitor for SSA_CFG_Compiler {
         self.cur_mem = mem_phi_result;
 
         // Variable phis for all local variables currently defined
-        let var_entries: Vec<(usize, String, ValueId)> = self
-            .var_to_value_id
-            .iter()
-            .flat_map(|(&scope_ind, scope_vars)| {
-                scope_vars
-                    .iter()
-                    .map(move |(name, &val)| (scope_ind, name.clone(), val))
-            })
-            .collect();
+        let var_entries = self.snapshot_vars();
 
         let mut var_phis: Vec<(usize, String, ValueId)> = vec![];
         for (scope_ind, var_name, entry_val) in &var_entries {
@@ -724,15 +830,25 @@ impl Visitor for SSA_CFG_Compiler {
             header_block: header_bb_id,
             exit_block: exit_bb_id,
             continue_target: update_bb_id,
+            break_edges: vec![],
+            continue_edges: vec![],
         });
 
         self.visit_block(for_statement.block.as_ref());
 
-        self.loop_stack.pop();
+        let loop_ctx = self.loop_stack.pop().unwrap();
+        let break_edges = loop_ctx.break_edges;
+        let continue_edges = loop_ctx.continue_edges;
+        let has_continues = !continue_edges.is_empty();
 
-        // Jump from body end to update block
-        if self.is_terminator_unreachable() {
-            let body_end_block_id = self.current_block_id();
+        // Capture body end state before branching
+        let body_fell_through = self.is_terminator_unreachable();
+        let body_end_block_id = self.current_block_id();
+        let body_end_mem = self.cur_mem;
+        let body_end_vars = self.snapshot_vars();
+
+        // Jump from body end to update block (if body fell through)
+        if body_fell_through {
             let mem = self.new_value(Type::Mem, "");
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
                 mem,
@@ -741,62 +857,48 @@ impl Visitor for SSA_CFG_Compiler {
             self.add_predecessor(update_bb_id, body_end_block_id);
         }
 
-        // Update block: execute the for-update, then jump back to header
+        // Update block: merge body-end + continue edges, then execute update expr
         self.start_block_with_id(update_bb_id);
-        match for_statement.update_expr.as_ref() {
-            AST::ASTNode::Assignment(assignment) => self.visit_assignment(assignment),
-            AST::ASTNode::MethodCall(method_call) => self.visit_method_call(method_call),
-            _ => {
-                eprintln!("Error: invalid for-update expression");
-                panic!();
+
+        if has_continues {
+            let mut update_incomings = vec![];
+            if body_fell_through {
+                update_incomings.push((body_end_block_id, body_end_mem, body_end_vars));
+            }
+            update_incomings.extend(continue_edges);
+            self.emit_merge_phis(&var_phis, &update_incomings);
+        } else if body_fell_through {
+            self.cur_mem = body_end_mem;
+        }
+
+        // Execute update expression and back-edge only if update block is reachable
+        if body_fell_through || has_continues {
+            match for_statement.update_expr.as_ref() {
+                AST::ASTNode::Assignment(assignment) => self.visit_assignment(assignment),
+                AST::ASTNode::MethodCall(method_call) => self.visit_method_call(method_call),
+                _ => {
+                    eprintln!("Error: invalid for-update expression");
+                    panic!();
+                }
+            }
+
+            // Back-edge: jump from update to header
+            if self.is_terminator_unreachable() {
+                let update_end_block_id = self.current_block_id();
+                let mem = self.new_value(Type::Mem, "");
+                self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
+                    mem,
+                    target: header_bb_id,
+                };
+                self.add_predecessor(header_bb_id, update_end_block_id);
+
+                let back_edge =
+                    vec![(update_end_block_id, self.cur_mem, self.snapshot_vars())];
+                self.patch_phis_from_edges(header_bb_id, mem_phi_result, &var_phis, &back_edge);
             }
         }
 
-        // Back-edge: jump from update to header
-        if self.is_terminator_unreachable() {
-            let update_end_block_id = self.current_block_id();
-            let mem = self.new_value(Type::Mem, "");
-            self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
-                mem,
-                target: header_bb_id,
-            };
-            self.add_predecessor(header_bb_id, update_end_block_id);
-
-            // Patch the header's memory phi with the back-edge incoming
-            let update_end_mem = self.cur_mem;
-            let header_ind = *self
-                .cur_func
-                .as_ref()
-                .unwrap()
-                .block_id_to_ind
-                .get(&header_bb_id)
-                .unwrap();
-            self.cur_func.as_mut().unwrap().blocks[header_ind]
-                .phis
-                .iter_mut()
-                .find(|phi| phi.result == mem_phi_result)
-                .unwrap()
-                .incomings
-                .push((update_end_block_id, update_end_mem));
-
-            // Patch variable phis with the back-edge incomings
-            for (scope_ind, var_name, phi_result) in &var_phis {
-                let back_edge_val = *self
-                    .var_to_value_id
-                    .get(scope_ind)
-                    .and_then(|m| m.get(var_name.as_str()))
-                    .unwrap();
-                self.cur_func.as_mut().unwrap().blocks[header_ind]
-                    .phis
-                    .iter_mut()
-                    .find(|phi| phi.result == *phi_result)
-                    .unwrap()
-                    .incomings
-                    .push((update_end_block_id, back_edge_val));
-            }
-        }
-
-        // Exit block: restore var_to_value_id to phi results
+        // Exit block: restore var_to_value_id to header phi results, then merge breaks
         for (scope_ind, var_name, phi_result) in &var_phis {
             self.var_to_value_id
                 .get_mut(scope_ind)
@@ -804,7 +906,18 @@ impl Visitor for SSA_CFG_Compiler {
                 .insert(var_name.clone(), *phi_result);
         }
         self.start_block_with_id(exit_bb_id);
-        self.cur_mem = mem_phi_result;
+
+        if !break_edges.is_empty() {
+            let header_snapshot = var_phis
+                .iter()
+                .map(|(s, n, p)| (*s, n.clone(), *p))
+                .collect();
+            let mut exit_incomings = vec![(header_bb_id, mem_phi_result, header_snapshot)];
+            exit_incomings.extend(break_edges);
+            self.emit_merge_phis(&var_phis, &exit_incomings);
+        } else {
+            self.cur_mem = mem_phi_result;
+        }
     }
 
     fn visit_while_statement(&mut self, while_statement: &AST::WhileStatement) {
@@ -840,17 +953,7 @@ impl Visitor for SSA_CFG_Compiler {
         // Variable phis: for each local variable currently defined, create a phi
         // so the header sees the updated value on back-edges from the body.
         // We'll patch the back-edge incoming after visiting the body.
-        //
-        // Collect entries first to avoid borrowing self while mutating.
-        let var_entries: Vec<(usize, String, ValueId)> = self
-            .var_to_value_id
-            .iter()
-            .flat_map(|(&scope_ind, scope_vars)| {
-                scope_vars
-                    .iter()
-                    .map(move |(name, &val)| (scope_ind, name.clone(), val))
-            })
-            .collect();
+        let var_entries = self.snapshot_vars();
 
         let mut var_phis: Vec<(usize, String, ValueId)> = vec![]; // (scope_ind, var_name, phi_result)
         for (scope_ind, var_name, entry_val) in &var_entries {
@@ -895,59 +998,37 @@ impl Visitor for SSA_CFG_Compiler {
             header_block: header_bb_id,
             exit_block: exit_bb_id,
             continue_target: header_bb_id,
+            break_edges: vec![],
+            continue_edges: vec![],
         });
 
         self.visit_block(while_statement.block.as_ref());
 
-        self.loop_stack.pop();
+        let loop_ctx = self.loop_stack.pop().unwrap();
+        let break_edges = loop_ctx.break_edges;
+        let continue_edges = loop_ctx.continue_edges;
 
-        // Back-edge: jump from end of body back to header
+        // Collect all edges targeting the header: body back-edge + continue edges
+        let mut header_patches: Vec<(BlockId, ValueId, Vec<(usize, String, ValueId)>)> = vec![];
         if self.is_terminator_unreachable() {
             let body_end_block_id = self.current_block_id();
+            let body_end_mem = self.cur_mem;
+            let body_end_vars = self.snapshot_vars();
             let mem = self.new_value(Type::Mem, "");
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::Br {
                 mem,
                 target: header_bb_id,
             };
             self.add_predecessor(header_bb_id, body_end_block_id);
+            header_patches.push((body_end_block_id, body_end_mem, body_end_vars));
+        }
+        header_patches.extend(continue_edges);
 
-            // Patch the header's memory phi with the back-edge incoming
-            let body_end_mem = self.cur_mem;
-            let header_ind = *self
-                .cur_func
-                .as_ref()
-                .unwrap()
-                .block_id_to_ind
-                .get(&header_bb_id)
-                .unwrap();
-            self.cur_func.as_mut().unwrap().blocks[header_ind]
-                .phis
-                .iter_mut()
-                .find(|phi| phi.result == mem_phi_result)
-                .unwrap()
-                .incomings
-                .push((body_end_block_id, body_end_mem));
-
-            // Patch variable phis with the back-edge incomings
-            for (scope_ind, var_name, phi_result) in &var_phis {
-                let back_edge_val = *self
-                    .var_to_value_id
-                    .get(scope_ind)
-                    .and_then(|m| m.get(var_name.as_str()))
-                    .unwrap();
-                self.cur_func.as_mut().unwrap().blocks[header_ind]
-                    .phis
-                    .iter_mut()
-                    .find(|phi| phi.result == *phi_result)
-                    .unwrap()
-                    .incomings
-                    .push((body_end_block_id, back_edge_val));
-            }
+        if !header_patches.is_empty() {
+            self.patch_phis_from_edges(header_bb_id, mem_phi_result, &var_phis, &header_patches);
         }
 
-        // Exit block: continue execution here.
-        // Restore var_to_value_id to the phi results — the exit block is a
-        // successor of the header, so variables should have the header phi values.
+        // Exit block: restore var_to_value_id to header phi results, then merge breaks
         for (scope_ind, var_name, phi_result) in &var_phis {
             self.var_to_value_id
                 .get_mut(scope_ind)
@@ -955,7 +1036,18 @@ impl Visitor for SSA_CFG_Compiler {
                 .insert(var_name.clone(), *phi_result);
         }
         self.start_block_with_id(exit_bb_id);
-        self.cur_mem = mem_phi_result;
+
+        if !break_edges.is_empty() {
+            let header_snapshot = var_phis
+                .iter()
+                .map(|(s, n, p)| (*s, n.clone(), *p))
+                .collect();
+            let mut exit_incomings = vec![(header_bb_id, mem_phi_result, header_snapshot)];
+            exit_incomings.extend(break_edges);
+            self.emit_merge_phis(&var_phis, &exit_incomings);
+        } else {
+            self.cur_mem = mem_phi_result;
+        }
     }
 
     fn visit_return_statement(&mut self, return_statement: &AST::ReturnStatement) {
@@ -974,7 +1066,36 @@ impl Visitor for SSA_CFG_Compiler {
         }
     }
 
-    fn visit_statement_control(&mut self, _statement_control: &AST::StatementControl) {}
+    fn visit_statement_control(&mut self, statement_control: &AST::StatementControl) {
+        let from_block = self.current_block_id();
+        let snap_mem = self.cur_mem;
+        let var_snapshot = self.snapshot_vars();
+
+        let loop_ctx = self.loop_stack.last().expect("break/continue outside loop");
+        let (target, is_break) = match statement_control.op.as_str() {
+            "break" => (loop_ctx.exit_block, true),
+            "continue" => (loop_ctx.continue_target, false),
+            _ => {
+                eprintln!(
+                    "Error: invalid statement control op: {}",
+                    statement_control.op
+                );
+                panic!();
+            }
+        };
+
+        let mem = self.new_value(Type::Mem, "");
+        self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term =
+            Terminator::Br { mem, target };
+        self.add_predecessor(target, from_block);
+
+        let edge = (from_block, snap_mem, var_snapshot);
+        if is_break {
+            self.loop_stack.last_mut().unwrap().break_edges.push(edge);
+        } else {
+            self.loop_stack.last_mut().unwrap().continue_edges.push(edge);
+        }
+    }
 
     fn visit_assignment(&mut self, assignment: &AST::Assignment) {
         let assign_op = assignment.assign_op.as_str();
