@@ -343,6 +343,24 @@ impl SSA_CFG_Compiler {
         return cur_terminator == Terminator::Unreachable;
     }
 
+    /// Check if a value name is a generic instruction name (not a user variable).
+    /// Used to decide whether to propagate a variable name onto a value.
+    fn is_generic_value_name(name: &str) -> bool {
+        name.is_empty()
+            || matches!(
+                name,
+                "call"
+                    | "binop"
+                    | "cmp"
+                    | "neg"
+                    | "not"
+                    | "cast"
+                    | "len"
+                    | "logic"
+                    | "short_circuit"
+            )
+    }
+
     /// Map a compound assignment operator string to the corresponding BinOp
     fn compound_assign_to_binop(op: &str) -> BinOp {
         match op {
@@ -1022,6 +1040,17 @@ impl Visitor for SSA_CFG_Compiler {
                 if is_global {
                     self.write_global_scalar(var_name, &var_type, rhs_value);
                 } else {
+                    // For simple '=' assignments, propagate the variable name
+                    // to the RHS value if it currently has a generic name.
+                    if assign_op == "=" {
+                        if let Some(info) =
+                            self.cur_func.as_mut().unwrap().values.get_mut(&rhs_value)
+                        {
+                            if Self::is_generic_value_name(&info.org_name) {
+                                info.org_name = var_name.to_string();
+                            }
+                        }
+                    }
                     self.var_to_value_id
                         .entry(var_scope_ind)
                         .or_insert_with(HashMap::new)
