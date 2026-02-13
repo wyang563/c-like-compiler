@@ -28,3 +28,4 @@ out_unit.txt
 *.txt*
 *tmp*
 tmp.out
+*.html

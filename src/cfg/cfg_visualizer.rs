@@ -71,7 +71,7 @@ fn visualize_function_ir(output: &mut String, func: &FunctionIR) {
 }
 
 /// Build a map from each BlockId to its labelled successor edges.
-fn collect_edges(func: &FunctionIR) -> HashMap<BlockId, Vec<(String, BlockId)>> {
+pub(super) fn collect_edges(func: &FunctionIR) -> HashMap<BlockId, Vec<(String, BlockId)>> {
     let mut edges: HashMap<BlockId, Vec<(String, BlockId)>> = HashMap::new();
     for block in &func.blocks {
         let succs = match &block.term {
@@ -164,11 +164,11 @@ fn render_block(output: &mut String, block: &BasicBlock, values: &HashMap<ValueI
 // Formatting helpers
 // ─────────────────────────────────────────────
 
-fn format_value_id(v: &ValueId) -> String {
+pub(super) fn format_value_id(v: &ValueId) -> String {
     format!("%v{}", v.0)
 }
 
-fn format_value_named(v: &ValueId, values: &HashMap<ValueId, ValueInfo>) -> String {
+pub(super) fn format_value_named(v: &ValueId, values: &HashMap<ValueId, ValueInfo>) -> String {
     let base = format_value_id(v);
     match values.get(v) {
         Some(info) if !info.org_name.is_empty() => format!("{}«{}»", base, info.org_name),
@@ -176,7 +176,7 @@ fn format_value_named(v: &ValueId, values: &HashMap<ValueId, ValueInfo>) -> Stri
     }
 }
 
-fn format_type(ty: &Type) -> String {
+pub(super) fn format_type(ty: &Type) -> String {
     match ty {
         Type::I1 => "i1".into(),
         Type::I8 => "i8".into(),
@@ -189,7 +189,7 @@ fn format_type(ty: &Type) -> String {
     }
 }
 
-fn format_const_value(cv: &ConstValue) -> String {
+pub(super) fn format_const_value(cv: &ConstValue) -> String {
     match cv {
         ConstValue::I1(b) => format!("{}", b),
         ConstValue::I32(i) => format!("{}", i),
@@ -197,7 +197,7 @@ fn format_const_value(cv: &ConstValue) -> String {
     }
 }
 
-fn format_phi(phi: &Phi, values: &HashMap<ValueId, ValueInfo>) -> String {
+pub(super) fn format_phi(phi: &Phi, values: &HashMap<ValueId, ValueInfo>) -> String {
     let incomings: Vec<String> = phi
         .incomings
         .iter()
@@ -211,7 +211,7 @@ fn format_phi(phi: &Phi, values: &HashMap<ValueId, ValueInfo>) -> String {
     )
 }
 
-fn format_instr(instr: &Instr, values: &HashMap<ValueId, ValueInfo>) -> String {
+pub(super) fn format_instr(instr: &Instr, values: &HashMap<ValueId, ValueInfo>) -> String {
     let results_str = if instr.results.is_empty() {
         String::new()
     } else {
@@ -372,7 +372,7 @@ fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> 
     }
 }
 
-fn format_terminator(term: &Terminator, values: &HashMap<ValueId, ValueInfo>) -> String {
+pub(super) fn format_terminator(term: &Terminator, values: &HashMap<ValueId, ValueInfo>) -> String {
     match term {
         Terminator::Br { mem, target } => {
             format!("br B{} [mem {}]", target.0, format_value_named(mem, values))
@@ -401,7 +401,7 @@ fn format_terminator(term: &Terminator, values: &HashMap<ValueId, ValueInfo>) ->
     }
 }
 
-fn format_global_decl(global: &GlobalDecl) -> String {
+pub(super) fn format_global_decl(global: &GlobalDecl) -> String {
     match &global.kind {
         GlobalKind::GlobalStr { bytes } => {
             let printable: String = bytes

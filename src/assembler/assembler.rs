@@ -1,3 +1,4 @@
+use super::super::cfg::cfg_html_visualizer::generate_html_cfg;
 use super::super::cfg::cfg_visualizer::visualize_program_ir;
 use super::super::cfg::ssa_cfg_compiler::compile_to_ssa_cfg;
 use super::super::parser::parser::parse_file;
@@ -13,6 +14,9 @@ pub fn assemble(input: &std::path::PathBuf, mut writer: Box<dyn std::io::Write>,
 
                     // visualize the CFG
                     visualize_program_ir(&ssa_cfg);
+
+                    // generate interactive HTML CFG
+                    generate_html_cfg(&ssa_cfg, "cfg_output.html");
                 }
                 Err(e) => {
                     writeln!(writer, "Error in semantic analysis of file with the following errors reported: \n {:?}", e).unwrap();

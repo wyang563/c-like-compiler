@@ -396,6 +396,7 @@ impl SSA_CFG_Compiler {
 
     /// Look up a variable's value in a snapshot by (scope_ind, var_name).
     fn lookup_snapshot_var(
+        &self,
         snapshot: &[(usize, String, ValueId)],
         scope_ind: usize,
         var_name: &str,
@@ -433,7 +434,7 @@ impl SSA_CFG_Compiler {
                 .push((*from_block, *edge_mem));
 
             for (scope_ind, var_name, phi_result) in var_phis {
-                let val = Self::lookup_snapshot_var(var_snapshot, *scope_ind, var_name);
+                let val = self.lookup_snapshot_var(var_snapshot, *scope_ind, var_name);
                 self.cur_func.as_mut().unwrap().blocks[block_ind]
                     .phis
                     .iter_mut()
@@ -470,7 +471,7 @@ impl SSA_CFG_Compiler {
         for (scope_ind, var_name, _) in var_phis {
             let var_incomings: Vec<(BlockId, ValueId)> = incomings
                 .iter()
-                .map(|(b, _, snap)| (*b, Self::lookup_snapshot_var(snap, *scope_ind, var_name)))
+                .map(|(b, _, snap)| (*b, self.lookup_snapshot_var(snap, *scope_ind, var_name)))
                 .collect();
             let var_ty = self.cur_func.as_ref().unwrap().values[&var_incomings[0].1]
                 .ty
@@ -892,8 +893,7 @@ impl Visitor for SSA_CFG_Compiler {
                 };
                 self.add_predecessor(header_bb_id, update_end_block_id);
 
-                let back_edge =
-                    vec![(update_end_block_id, self.cur_mem, self.snapshot_vars())];
+                let back_edge = vec![(update_end_block_id, self.cur_mem, self.snapshot_vars())];
                 self.patch_phis_from_edges(header_bb_id, mem_phi_result, &var_phis, &back_edge);
             }
         }
@@ -1093,7 +1093,11 @@ impl Visitor for SSA_CFG_Compiler {
         if is_break {
             self.loop_stack.last_mut().unwrap().break_edges.push(edge);
         } else {
-            self.loop_stack.last_mut().unwrap().continue_edges.push(edge);
+            self.loop_stack
+                .last_mut()
+                .unwrap()
+                .continue_edges
+                .push(edge);
         }
     }
 
