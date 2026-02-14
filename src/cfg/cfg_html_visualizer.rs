@@ -10,20 +10,80 @@ use std::fs;
 // Layout constants
 // ─────────────────────────────────────────────
 
-const BLOCK_W: f64 = 180.0;
-const BLOCK_H: f64 = 50.0;
-const H_GAP: f64 = 60.0;
-const V_GAP: f64 = 80.0;
-const SVG_PAD: f64 = 40.0;
-const ARROW_SIZE: f64 = 8.0;
+const CHAR_W: f64 = 6.6; // monospace char width at font-size 11px
+const CODE_LINE_H: f64 = 16.0;
+const BLOCK_PAD_TOP: f64 = 8.0; // top padding inside block
+const BLOCK_PAD_BOT: f64 = 18.0; // bottom padding (extra room for text descenders)
+const BLOCK_PAD_X: f64 = 10.0; // horizontal padding inside block
+const HEADER_H: f64 = 22.0; // height for block label header area
+const GAP_AFTER_HEADER: f64 = 6.0; // gap between header separator and body
+const TERM_SEP_SPACE: f64 = 10.0; // space around dashed separator before terminator
+const H_GAP: f64 = 80.0; // horizontal gap between blocks in same layer
+const V_GAP: f64 = 70.0; // vertical gap between layers (edge routing space)
+const SVG_PAD: f64 = 60.0;
+const ARROW_SIZE: f64 = 10.0;
+const MIN_BLOCK_W: f64 = 130.0;
+const BACK_EDGE_MARGIN: f64 = 70.0; // extra horizontal space for back-edge curves
 
 // ─────────────────────────────────────────────
-// Block layout position
+// Block content & sizing
 // ─────────────────────────────────────────────
 
-struct BlockLayout {
-    x: f64,
-    y: f64,
+struct BlockContent {
+    body_lines: Vec<String>,
+    term_line: String,
+    w: f64,
+    h: f64,
+}
+
+fn compute_block_content(block: &BasicBlock, values: &HashMap<ValueId, ValueInfo>) -> BlockContent {
+    let mut body_lines = Vec::new();
+
+    if let Some(mem_phi) = &block.mem_in {
+        body_lines.push(format_phi(mem_phi, values));
+    }
+    for phi in &block.phis {
+        body_lines.push(format_phi(phi, values));
+    }
+    for instr in &block.instrs {
+        body_lines.push(format_instr(instr, values));
+    }
+
+    let term_line = format_terminator(&block.term, values);
+
+    let label = format!("B{}", block.id.0);
+    let max_chars = body_lines
+        .iter()
+        .chain(std::iter::once(&term_line))
+        .map(|l| l.len())
+        .chain(std::iter::once(label.len() + 2))
+        .max()
+        .unwrap_or(10);
+
+    let w = f64::max(MIN_BLOCK_W, max_chars as f64 * CHAR_W + BLOCK_PAD_X * 2.0);
+
+    let body_h = body_lines.len() as f64 * CODE_LINE_H;
+    let term_sep = if body_lines.is_empty() {
+        0.0
+    } else {
+        TERM_SEP_SPACE
+    };
+    let h =
+        BLOCK_PAD_TOP + HEADER_H + GAP_AFTER_HEADER + body_h + term_sep + CODE_LINE_H + BLOCK_PAD_BOT;
+
+    BlockContent {
+        body_lines,
+        term_line,
+        w,
+        h,
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 // ─────────────────────────────────────────────
@@ -41,7 +101,6 @@ fn assign_layers(func: &FunctionIR) -> HashMap<BlockId, usize> {
     queue.push_back(entry);
     layers.insert(entry, 0);
 
-    // build successor map
     let edges = collect_edges(func);
 
     while let Some(bid) = queue.pop_front() {
@@ -56,7 +115,6 @@ fn assign_layers(func: &FunctionIR) -> HashMap<BlockId, usize> {
         }
     }
 
-    // assign any unreachable blocks to max_layer + 1
     let max_layer = layers.values().copied().max().unwrap_or(0);
     for block in &func.blocks {
         layers.entry(block.id).or_insert(max_layer + 1);
@@ -65,28 +123,66 @@ fn assign_layers(func: &FunctionIR) -> HashMap<BlockId, usize> {
     layers
 }
 
-fn compute_layout(func: &FunctionIR) -> HashMap<BlockId, BlockLayout> {
+// ─────────────────────────────────────────────
+// Layout computation (variable-sized blocks)
+// ─────────────────────────────────────────────
+
+struct BlockLayout {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+fn compute_layout(
+    func: &FunctionIR,
+    contents: &HashMap<BlockId, BlockContent>,
+) -> HashMap<BlockId, BlockLayout> {
     let layers = assign_layers(func);
 
-    // group blocks by layer, preserving block order within each layer
     let max_layer = layers.values().copied().max().unwrap_or(0);
     let mut layer_blocks: Vec<Vec<BlockId>> = vec![vec![]; max_layer + 1];
     for block in &func.blocks {
-        let layer = layers[&block.id];
-        layer_blocks[layer].push(block.id);
+        layer_blocks[layers[&block.id]].push(block.id);
+    }
+
+    // cumulative Y positions based on per-layer max height
+    let mut layer_y: Vec<f64> = Vec::new();
+    let mut cum_y = 0.0;
+    for blocks in &layer_blocks {
+        layer_y.push(cum_y);
+        let max_h = blocks
+            .iter()
+            .map(|bid| contents.get(bid).map(|c| c.h).unwrap_or(40.0))
+            .fold(0.0_f64, f64::max);
+        cum_y += max_h + V_GAP;
     }
 
     let mut positions: HashMap<BlockId, BlockLayout> = HashMap::new();
 
     for (layer_idx, blocks) in layer_blocks.iter().enumerate() {
-        let count = blocks.len() as f64;
-        let total_w = count * BLOCK_W + (count - 1.0).max(0.0) * H_GAP;
+        let widths: Vec<f64> = blocks
+            .iter()
+            .map(|bid| contents.get(bid).map(|c| c.w).unwrap_or(MIN_BLOCK_W))
+            .collect();
+        let total_w: f64 =
+            widths.iter().sum::<f64>() + (blocks.len() as f64 - 1.0).max(0.0) * H_GAP;
         let start_x = -total_w / 2.0;
+        let mut cur_x = start_x;
 
         for (i, bid) in blocks.iter().enumerate() {
-            let x = start_x + i as f64 * (BLOCK_W + H_GAP);
-            let y = layer_idx as f64 * (BLOCK_H + V_GAP);
-            positions.insert(*bid, BlockLayout { x, y });
+            let w = widths[i];
+            let h = contents.get(bid).map(|c| c.h).unwrap_or(40.0);
+            positions.insert(
+                *bid,
+                BlockLayout {
+                    x: cur_x,
+                    y: layer_y[layer_idx],
+                    w,
+                    h,
+                },
+            );
+            cur_x += w + H_GAP;
         }
     }
 
@@ -94,50 +190,16 @@ fn compute_layout(func: &FunctionIR) -> HashMap<BlockId, BlockLayout> {
 }
 
 // ─────────────────────────────────────────────
-// Detect back-edges (target layer <= source layer)
-// ─────────────────────────────────────────────
-
-fn is_back_edge(layers: &HashMap<BlockId, usize>, from: BlockId, to: BlockId) -> bool {
-    let from_layer = layers.get(&from).copied().unwrap_or(0);
-    let to_layer = layers.get(&to).copied().unwrap_or(0);
-    to_layer <= from_layer
-}
-
-// ─────────────────────────────────────────────
-// Block content as HTML-escaped text lines
-// ─────────────────────────────────────────────
-
-fn block_content_lines(block: &BasicBlock, values: &HashMap<ValueId, ValueInfo>) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    if let Some(mem_phi) = &block.mem_in {
-        lines.push(format_phi(mem_phi, values));
-    }
-    for phi in &block.phis {
-        lines.push(format_phi(phi, values));
-    }
-    for instr in &block.instrs {
-        lines.push(format_instr(instr, values));
-    }
-    lines.push("--- terminator ---".to_string());
-    lines.push(format_terminator(&block.term, values));
-
-    lines
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-// ─────────────────────────────────────────────
-// SVG generation per function
+// SVG rendering
 // ─────────────────────────────────────────────
 
 fn render_function_svg(func: &FunctionIR) -> String {
-    let positions = compute_layout(func);
+    let mut contents: HashMap<BlockId, BlockContent> = HashMap::new();
+    for block in &func.blocks {
+        contents.insert(block.id, compute_block_content(block, &func.values));
+    }
+
+    let positions = compute_layout(func, &contents);
     let layers = assign_layers(func);
     let edges = collect_edges(func);
 
@@ -152,16 +214,16 @@ fn render_function_svg(func: &FunctionIR) -> String {
         .fold(f64::INFINITY, f64::min);
     let max_x = positions
         .values()
-        .map(|p| p.x + BLOCK_W)
+        .map(|p| p.x + p.w)
         .fold(f64::NEG_INFINITY, f64::max);
     let max_y = positions
         .values()
-        .map(|p| p.y + BLOCK_H)
+        .map(|p| p.y + p.h)
         .fold(f64::NEG_INFINITY, f64::max);
 
-    let svg_w = (max_x - min_x) + SVG_PAD * 2.0;
+    let svg_w = (max_x - min_x) + SVG_PAD * 2.0 + BACK_EDGE_MARGIN;
     let svg_h = max_y + SVG_PAD * 2.0;
-    let offset_x = -min_x + SVG_PAD;
+    let offset_x = -min_x + SVG_PAD + BACK_EDGE_MARGIN; // margin on left for back-edge curves
     let offset_y = SVG_PAD;
 
     let mut svg = String::new();
@@ -173,7 +235,7 @@ fn render_function_svg(func: &FunctionIR) -> String {
     )
     .unwrap();
 
-    // arrow marker defs
+    // arrow marker definitions
     writeln!(svg, r#"  <defs>"#).unwrap();
     for (id, color) in [
         ("arrow-default", "#cdd6f4"),
@@ -182,7 +244,7 @@ fn render_function_svg(func: &FunctionIR) -> String {
     ] {
         writeln!(
             svg,
-            r#"    <marker id="{id}" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="{sz}" markerHeight="{sz}" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{color}"/></marker>"#,
+            r#"    <marker id="{id}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="{sz}" markerHeight="{sz}" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{color}"/></marker>"#,
             id = id,
             sz = ARROW_SIZE,
             color = color,
@@ -191,63 +253,214 @@ fn render_function_svg(func: &FunctionIR) -> String {
     }
     writeln!(svg, r#"  </defs>"#).unwrap();
 
-    // draw edges first (behind blocks)
+    // ── render edges FIRST (behind blocks) ──
     for block in &func.blocks {
-        if let Some(succs) = edges.get(&block.id) {
-            let from_pos = &positions[&block.id];
-            let from_cx = from_pos.x + offset_x + BLOCK_W / 2.0;
-            let from_bot = from_pos.y + offset_y + BLOCK_H;
+        let Some(succs) = edges.get(&block.id) else {
+            continue;
+        };
+        let from_pos = &positions[&block.id];
+        let num_succs = succs.len();
 
-            for (label, target) in succs {
-                let to_pos = &positions[target];
-                let to_cx = to_pos.x + offset_x + BLOCK_W / 2.0;
-                let to_top = to_pos.y + offset_y;
+        for (edge_idx, (label, target)) in succs.iter().enumerate() {
+            let to_pos = &positions[target];
 
-                let (color, marker) = match label.trim() {
-                    "T" => ("#a6e3a1", "url(#arrow-true)"),
-                    "F" => ("#f38ba8", "url(#arrow-false)"),
-                    _ => ("#cdd6f4", "url(#arrow-default)"),
-                };
+            let (color, marker) = match label.trim() {
+                "T" => ("#a6e3a1", "url(#arrow-true)"),
+                "F" => ("#f38ba8", "url(#arrow-false)"),
+                _ => ("#cdd6f4", "url(#arrow-default)"),
+            };
 
-                let back = is_back_edge(&layers, block.id, *target);
-                let dash = if back {
-                    r#" stroke-dasharray="6,4""#
-                } else {
-                    ""
-                };
+            let from_layer = layers.get(&block.id).copied().unwrap_or(0);
+            let to_layer = layers.get(target).copied().unwrap_or(0);
 
-                if back {
-                    // draw a curved back-edge: go out to the right side
-                    let from_right = from_pos.x + offset_x + BLOCK_W;
-                    let from_mid_y = from_pos.y + offset_y + BLOCK_H / 2.0;
-                    let to_right = to_pos.x + offset_x + BLOCK_W;
-                    let to_mid_y = to_pos.y + offset_y + BLOCK_H / 2.0;
-                    let ctrl_x = f64::max(from_right, to_right) + 50.0;
+            if to_layer < from_layer {
+                // True back edge (target is on an earlier layer): curve LEFT
+                let dash = r#" stroke-dasharray="6,4""#;
+                let from_left = from_pos.x + offset_x;
+                let from_mid_y = from_pos.y + offset_y + from_pos.h / 2.0;
+                let to_left = to_pos.x + offset_x;
+                let to_mid_y = to_pos.y + offset_y + to_pos.h / 2.0;
+                let ctrl_x = f64::min(from_left, to_left) - BACK_EDGE_MARGIN + 10.0;
+
+                let path = format!(
+                    "M {fx},{fy} C {cx},{fy} {cx},{ty} {tx},{ty}",
+                    fx = from_left,
+                    fy = from_mid_y,
+                    cx = ctrl_x,
+                    ty = to_mid_y,
+                    tx = to_left,
+                );
+
+                // dark outline
+                writeln!(
+                    svg,
+                    r##"  <path d="{path}" fill="none" stroke="#1e1e2e" stroke-width="6" stroke-linecap="round"{dash}/>"##,
+                    path = path,
+                    dash = dash,
+                )
+                .unwrap();
+                // colored stroke
+                writeln!(
+                    svg,
+                    r#"  <path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" marker-end="{marker}"{dash}/>"#,
+                    path = path,
+                    color = color,
+                    marker = marker,
+                    dash = dash,
+                )
+                .unwrap();
+
+                // edge label
+                if !label.trim().is_empty() {
+                    let lx = ctrl_x - 16.0;
+                    let ly = (from_mid_y + to_mid_y) / 2.0;
                     writeln!(
                         svg,
-                        r#"  <path d="M {fx},{fy} C {cx},{fy} {cx},{ty} {tx},{ty}" fill="none" stroke="{color}" stroke-width="1.5" marker-end="{marker}"{dash}/>"#,
-                        fx = from_right,
-                        fy = from_mid_y,
-                        cx = ctrl_x,
-                        ty = to_mid_y,
-                        tx = to_right,
+                        r##"  <rect x="{rx}" y="{ry}" width="16" height="16" rx="3" fill="#1e1e2e" stroke="{color}" stroke-width="1"/>"##,
+                        rx = lx - 3.0,
+                        ry = ly - 12.0,
                         color = color,
-                        marker = marker,
-                        dash = dash,
                     )
                     .unwrap();
-                } else {
-                    // straight/angled line from bottom-center to top-center
                     writeln!(
                         svg,
-                        r#"  <line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="1.5" marker-end="{marker}"{dash}/>"#,
-                        x1 = from_cx,
-                        y1 = from_bot,
-                        x2 = to_cx,
-                        y2 = to_top,
+                        r##"  <text x="{lx}" y="{ly}" fill="{color}" font-family="monospace" font-size="11" font-weight="bold" text-anchor="middle">{label}</text>"##,
+                        lx = lx + 5.0,
+                        ly = ly,
                         color = color,
-                        marker = marker,
-                        dash = dash,
+                        label = label.trim(),
+                    )
+                    .unwrap();
+                }
+            } else if to_layer == from_layer {
+                // Same-layer edge: route horizontally between blocks
+                let from_cx = from_pos.x + offset_x + from_pos.w / 2.0;
+                let to_cx = to_pos.x + offset_x + to_pos.w / 2.0;
+
+                let (fx, fy, tx, ty);
+                if to_cx > from_cx {
+                    // target is to the right
+                    fx = from_pos.x + offset_x + from_pos.w;
+                    fy = from_pos.y + offset_y + from_pos.h / 2.0;
+                    tx = to_pos.x + offset_x;
+                    ty = to_pos.y + offset_y + to_pos.h / 2.0;
+                } else {
+                    // target is to the left
+                    fx = from_pos.x + offset_x;
+                    fy = from_pos.y + offset_y + from_pos.h / 2.0;
+                    tx = to_pos.x + offset_x + to_pos.w;
+                    ty = to_pos.y + offset_y + to_pos.h / 2.0;
+                }
+
+                let mid_x = (fx + tx) / 2.0;
+                let path = format!(
+                    "M {fx},{fy} C {mx},{fy} {mx},{ty} {tx},{ty}",
+                    fx = fx,
+                    fy = fy,
+                    mx = mid_x,
+                    ty = ty,
+                    tx = tx,
+                );
+
+                // dark outline
+                writeln!(
+                    svg,
+                    r##"  <path d="{path}" fill="none" stroke="#1e1e2e" stroke-width="6" stroke-linecap="round"/>"##,
+                    path = path,
+                )
+                .unwrap();
+                // colored stroke
+                writeln!(
+                    svg,
+                    r#"  <path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" marker-end="{marker}"/>"#,
+                    path = path,
+                    color = color,
+                    marker = marker,
+                )
+                .unwrap();
+
+                // edge label near source
+                if !label.trim().is_empty() {
+                    let lx = fx + if to_cx > from_cx { 8.0 } else { -24.0 };
+                    let ly = fy - 10.0;
+                    writeln!(
+                        svg,
+                        r##"  <rect x="{rx}" y="{ry}" width="16" height="16" rx="3" fill="#1e1e2e" stroke="{color}" stroke-width="1"/>"##,
+                        rx = lx - 3.0,
+                        ry = ly - 12.0,
+                        color = color,
+                    )
+                    .unwrap();
+                    writeln!(
+                        svg,
+                        r##"  <text x="{lx}" y="{ly}" fill="{color}" font-family="monospace" font-size="11" font-weight="bold" text-anchor="middle">{label}</text>"##,
+                        lx = lx + 5.0,
+                        ly = ly,
+                        color = color,
+                        label = label.trim(),
+                    )
+                    .unwrap();
+                }
+            } else {
+                // Forward edge: bezier from bottom of source to top of target
+                let from_x = if num_succs == 2 {
+                    let frac = if edge_idx == 0 { 0.35 } else { 0.65 };
+                    from_pos.x + offset_x + from_pos.w * frac
+                } else {
+                    from_pos.x + offset_x + from_pos.w / 2.0
+                };
+                let from_y = from_pos.y + offset_y + from_pos.h;
+
+                let to_x = to_pos.x + offset_x + to_pos.w / 2.0;
+                let to_y = to_pos.y + offset_y;
+
+                // S-curve through the gap between layers
+                let mid_y = (from_y + to_y) / 2.0;
+                let path = format!(
+                    "M {fx},{fy} C {fx},{my} {tx},{my} {tx},{ty}",
+                    fx = from_x,
+                    fy = from_y,
+                    my = mid_y,
+                    tx = to_x,
+                    ty = to_y,
+                );
+
+                // dark outline
+                writeln!(
+                    svg,
+                    r##"  <path d="{path}" fill="none" stroke="#1e1e2e" stroke-width="6" stroke-linecap="round"/>"##,
+                    path = path,
+                )
+                .unwrap();
+                // colored stroke
+                writeln!(
+                    svg,
+                    r#"  <path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" marker-end="{marker}"/>"#,
+                    path = path,
+                    color = color,
+                    marker = marker,
+                )
+                .unwrap();
+
+                // edge label near source
+                if !label.trim().is_empty() {
+                    let lx = from_x + 8.0;
+                    let ly = from_y + 16.0;
+                    writeln!(
+                        svg,
+                        r##"  <rect x="{rx}" y="{ry}" width="16" height="16" rx="3" fill="#1e1e2e" stroke="{color}" stroke-width="1"/>"##,
+                        rx = lx - 3.0,
+                        ry = ly - 12.0,
+                        color = color,
+                    )
+                    .unwrap();
+                    writeln!(
+                        svg,
+                        r##"  <text x="{lx}" y="{ly}" fill="{color}" font-family="monospace" font-size="11" font-weight="bold" text-anchor="middle">{label}</text>"##,
+                        lx = lx + 5.0,
+                        ly = ly,
+                        color = color,
+                        label = label.trim(),
                     )
                     .unwrap();
                 }
@@ -255,57 +468,83 @@ fn render_function_svg(func: &FunctionIR) -> String {
         }
     }
 
-    // draw blocks
+    // ── render blocks ON TOP (so they occlude edges passing behind them) ──
     for block in &func.blocks {
         let pos = &positions[&block.id];
-        let x = pos.x + offset_x;
-        let y = pos.y + offset_y;
+        let content = &contents[&block.id];
+        let bx = pos.x + offset_x;
+        let by = pos.y + offset_y;
+        let bw = pos.w;
+        let bh = pos.h;
         let label = format!("B{}", block.id.0);
 
-        let content_lines = block_content_lines(block, &func.values);
-        let tooltip_html: String = content_lines
-            .iter()
-            .map(|l| html_escape(l))
-            .collect::<Vec<_>>()
-            .join("<br/>");
+        writeln!(svg, r#"  <g class="cfg-block">"#).unwrap();
 
-        // block group with hover events
-        writeln!(
-            svg,
-            r#"  <g class="cfg-block" onmouseenter="showTip(evt, this)" onmouseleave="hideTip(evt, this)">"#,
-        )
-        .unwrap();
-
-        // rect
+        // block background
         writeln!(
             svg,
             r##"    <rect x="{x}" y="{y}" width="{w}" height="{h}" rx="6" ry="6" fill="#313244" stroke="#585b70" stroke-width="1.5"/>"##,
-            x = x,
-            y = y,
-            w = BLOCK_W,
-            h = BLOCK_H,
+            x = bx, y = by, w = bw, h = bh,
         )
         .unwrap();
 
-        // label text
+        // header label (centered, blue)
+        let label_baseline = by + BLOCK_PAD_TOP + 14.0;
         writeln!(
             svg,
-            r##"    <text x="{tx}" y="{ty}" text-anchor="middle" dominant-baseline="central" fill="#cdd6f4" font-family="monospace" font-size="14" font-weight="bold">{label}</text>"##,
-            tx = x + BLOCK_W / 2.0,
-            ty = y + BLOCK_H / 2.0,
+            r##"    <text x="{tx}" y="{ty}" text-anchor="middle" fill="#89b4fa" font-family="monospace" font-size="13" font-weight="bold">{label}</text>"##,
+            tx = bx + bw / 2.0,
+            ty = label_baseline,
             label = label,
         )
         .unwrap();
 
-        // hidden tooltip data attribute
+        // solid separator after header
+        let sep_y = by + BLOCK_PAD_TOP + HEADER_H;
         writeln!(
             svg,
-            r#"    <rect class="hit" x="{x}" y="{y}" width="{w}" height="{h}" fill="transparent" data-tooltip="{tip}"/>"#,
-            x = x,
-            y = y,
-            w = BLOCK_W,
-            h = BLOCK_H,
-            tip = html_escape(&tooltip_html.replace("\"", "&quot;")),
+            r##"    <line x1="{x1}" y1="{sy}" x2="{x2}" y2="{sy}" stroke="#585b70" stroke-width="0.5"/>"##,
+            x1 = bx + 4.0,
+            x2 = bx + bw - 4.0,
+            sy = sep_y,
+        )
+        .unwrap();
+
+        // body lines (white text)
+        let mut text_y = sep_y + GAP_AFTER_HEADER + 12.0;
+        for line in &content.body_lines {
+            writeln!(
+                svg,
+                r##"    <text x="{tx}" y="{ty}" fill="#cdd6f4" font-family="monospace" font-size="11">{text}</text>"##,
+                tx = bx + BLOCK_PAD_X,
+                ty = text_y,
+                text = html_escape(line),
+            )
+            .unwrap();
+            text_y += CODE_LINE_H;
+        }
+
+        // dashed separator before terminator (only if body content exists)
+        if !content.body_lines.is_empty() {
+            let dsep_y = text_y - CODE_LINE_H + CODE_LINE_H + TERM_SEP_SPACE / 2.0;
+            writeln!(
+                svg,
+                r##"    <line x1="{x1}" y1="{sy}" x2="{x2}" y2="{sy}" stroke="#585b70" stroke-width="0.5" stroke-dasharray="4,3"/>"##,
+                x1 = bx + 4.0,
+                x2 = bx + bw - 4.0,
+                sy = dsep_y,
+            )
+            .unwrap();
+            text_y = dsep_y + TERM_SEP_SPACE / 2.0 + 12.0;
+        }
+
+        // terminator line (yellow text)
+        writeln!(
+            svg,
+            r##"    <text x="{tx}" y="{ty}" fill="#f9e2af" font-family="monospace" font-size="11">{text}</text>"##,
+            tx = bx + BLOCK_PAD_X,
+            ty = text_y,
+            text = html_escape(&content.term_line),
         )
         .unwrap();
 
@@ -387,22 +626,6 @@ details[open] summary::before {{
     font-size: 13px;
     white-space: pre;
 }}
-#tooltip {{
-    position: fixed;
-    display: none;
-    background: #181825;
-    border: 1px solid #585b70;
-    border-radius: 6px;
-    padding: 10px 14px;
-    font-family: monospace;
-    font-size: 12px;
-    color: #cdd6f4;
-    line-height: 1.6;
-    pointer-events: none;
-    z-index: 1000;
-    max-width: 600px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-}}
 "#
     )
     .unwrap();
@@ -410,9 +633,6 @@ details[open] summary::before {{
     writeln!(html, r#"</head>"#).unwrap();
     writeln!(html, r#"<body>"#).unwrap();
     writeln!(html, r#"<h1>Control Flow Graph</h1>"#).unwrap();
-
-    // tooltip div
-    writeln!(html, r#"<div id="tooltip"></div>"#).unwrap();
 
     // globals
     if !program_ir.globals.is_empty() {
@@ -464,42 +684,6 @@ details[open] summary::before {{
         writeln!(html, r#"</div>"#).unwrap();
         writeln!(html, r#"</details>"#).unwrap();
     }
-
-    // inline JS for tooltip
-    writeln!(html, r#"<script>"#).unwrap();
-    writeln!(
-        html,
-        r#"
-const tip = document.getElementById('tooltip');
-function showTip(evt, g) {{
-    const hit = g.querySelector('.hit');
-    if (!hit) return;
-    const raw = hit.getAttribute('data-tooltip');
-    if (!raw) return;
-    tip.innerHTML = raw;
-    tip.style.display = 'block';
-    positionTip(evt);
-}}
-function hideTip(evt, g) {{
-    tip.style.display = 'none';
-}}
-document.addEventListener('mousemove', function(e) {{
-    if (tip.style.display === 'block') positionTip(e);
-}});
-function positionTip(e) {{
-    let x = e.clientX + 16;
-    let y = e.clientY + 16;
-    const tw = tip.offsetWidth;
-    const th = tip.offsetHeight;
-    if (x + tw > window.innerWidth - 8) x = e.clientX - tw - 8;
-    if (y + th > window.innerHeight - 8) y = e.clientY - th - 8;
-    tip.style.left = x + 'px';
-    tip.style.top = y + 'px';
-}}
-"#
-    )
-    .unwrap();
-    writeln!(html, r#"</script>"#).unwrap();
 
     writeln!(html, r#"</body>"#).unwrap();
     writeln!(html, r#"</html>"#).unwrap();
