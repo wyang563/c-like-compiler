@@ -1985,7 +1985,8 @@ impl Visitor for SSA_CFG_Compiler {
             // declare: allocate a new SSA value for this variable
             0 => {
                 if !is_global {
-                    let new_value_id = self.get_next_value_id();
+                    // put newly declared variable in FunctionIR values map
+                    let new_value_id = self.new_value(self.result_var_type.clone(), id_name);
 
                     // if we are initializing a method then push the parameters as value ids
                     if self.init_method {
@@ -1993,16 +1994,13 @@ impl Visitor for SSA_CFG_Compiler {
                             .as_mut()
                             .unwrap()
                             .params
-                            .push(ValueId(new_value_id));
+                            .push(new_value_id);
                     }
 
                     self.var_to_value_id
                         .entry(var_scope_ind)
                         .or_insert(HashMap::new())
-                        .insert(id_name.to_string(), ValueId(new_value_id));
-
-                    // put newly declared variable in FunctionIR values map
-                    self.new_value(self.result_var_type.clone(), id_name);
+                        .insert(id_name.to_string(), new_value_id);
                 }
             }
             // read: look up or load the variable's current value
