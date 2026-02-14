@@ -204,7 +204,8 @@ pub(super) fn format_phi(phi: &Phi, values: &HashMap<ValueId, ValueInfo>) -> Str
         .map(|(bid, vid)| format!("[B{}: {}]", bid.0, format_value_named(vid, values)))
         .collect();
     format!(
-        "{}:{} = phi {}",
+        "[i{}] {}:{} = phi {}",
+        phi.id.0,
         format_value_named(&phi.result, values),
         format_type(&phi.ty),
         incomings.join(", ")
@@ -230,7 +231,7 @@ pub(super) fn format_instr(instr: &Instr, values: &HashMap<ValueId, ValueInfo>) 
     };
 
     let kind_str = format_instr_kind(&instr.kind, values);
-    format!("{}{}", results_str, kind_str)
+    format!("[i{}] {}{}", instr.id.0, results_str, kind_str)
 }
 
 fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> String {

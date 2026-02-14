@@ -190,6 +190,65 @@ fn compute_layout(
 }
 
 // ─────────────────────────────────────────────
+// Variable declarations tracking
+// ─────────────────────────────────────────────
+
+fn collect_variable_declarations(func: &FunctionIR) -> Vec<(String, String, String)> {
+    let mut declarations: Vec<(String, String, String)> = Vec::new();
+
+    for block in &func.blocks {
+        // Check memory phi
+        if let Some(mem_phi) = &block.mem_in {
+            if let Some(info) = func.values.get(&mem_phi.result) {
+                if !info.org_name.is_empty() {
+                    declarations.push((
+                        format!("%v{}", mem_phi.result.0),
+                        format_type(&info.ty),
+                        format!("i{}", mem_phi.id.0),
+                    ));
+                }
+            }
+        }
+
+        // Check variable phis
+        for phi in &block.phis {
+            if let Some(info) = func.values.get(&phi.result) {
+                if !info.org_name.is_empty() {
+                    declarations.push((
+                        format!("%v{}", phi.result.0),
+                        format_type(&info.ty),
+                        format!("i{}", phi.id.0),
+                    ));
+                }
+            }
+        }
+
+        // Check instructions
+        for instr in &block.instrs {
+            for result_val in &instr.results {
+                if let Some(info) = func.values.get(result_val) {
+                    if !info.org_name.is_empty() {
+                        declarations.push((
+                            format!("%v{}", result_val.0),
+                            format_type(&info.ty),
+                            format!("i{}", instr.id.0),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by variable ID number for easier lookup
+    declarations.sort_by(|a, b| {
+        let a_num = a.0.trim_start_matches("%v").parse::<u32>().unwrap_or(0);
+        let b_num = b.0.trim_start_matches("%v").parse::<u32>().unwrap_or(0);
+        a_num.cmp(&b_num)
+    });
+    declarations
+}
+
+// ─────────────────────────────────────────────
 // SVG rendering
 // ─────────────────────────────────────────────
 
@@ -589,6 +648,11 @@ h2 {{
     margin: 0;
     cursor: pointer;
 }}
+h3 {{
+    color: #f9e2af;
+    font-size: 0.95em;
+    margin: 0 0 12px 0;
+}}
 details {{
     margin-bottom: 24px;
 }}
@@ -612,9 +676,47 @@ details summary::before {{
 details[open] summary::before {{
     transform: rotate(90deg);
 }}
+.function-content {{
+    display: flex;
+    gap: 20px;
+}}
 .svg-container {{
+    flex: 1;
     overflow-x: auto;
     padding: 16px 0;
+}}
+.side-panel {{
+    width: 300px;
+    flex-shrink: 0;
+    background: #181825;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    padding: 16px;
+    max-height: 800px;
+    overflow-y: auto;
+}}
+.var-list {{
+    font-family: monospace;
+    font-size: 12px;
+}}
+.var-item {{
+    padding: 6px 8px;
+    margin-bottom: 4px;
+    background: #1e1e2e;
+    border-radius: 4px;
+    border-left: 3px solid #89b4fa;
+}}
+.var-name {{
+    color: #cdd6f4;
+    font-weight: bold;
+}}
+.var-type {{
+    color: #a6e3a1;
+    font-size: 11px;
+}}
+.var-instr {{
+    color: #f9e2af;
+    font-size: 11px;
 }}
 .globals {{
     background: #181825;
@@ -676,12 +778,52 @@ details[open] summary::before {{
             html_escape(&header)
         )
         .unwrap();
-        writeln!(html, r#"<div class="svg-container">"#).unwrap();
 
+        writeln!(html, r#"<div class="function-content">"#).unwrap();
+
+        // Side panel with variable declarations
+        let var_decls = collect_variable_declarations(func);
+        writeln!(html, r#"<div class="side-panel">"#).unwrap();
+        writeln!(html, r#"<h3>Variable Declarations</h3>"#).unwrap();
+        writeln!(html, r#"<div class="var-list">"#).unwrap();
+
+        if var_decls.is_empty() {
+            writeln!(html, r#"<div style="color: #585b70; font-style: italic;">No named variables</div>"#).unwrap();
+        } else {
+            for (var_name, var_type, instr_id) in var_decls {
+                writeln!(html, r#"<div class="var-item">"#).unwrap();
+                writeln!(
+                    html,
+                    r#"<div class="var-name">{}</div>"#,
+                    html_escape(&var_name)
+                )
+                .unwrap();
+                writeln!(
+                    html,
+                    r#"<div class="var-type">type: {}</div>"#,
+                    html_escape(&var_type)
+                )
+                .unwrap();
+                writeln!(
+                    html,
+                    r#"<div class="var-instr">declared by: [{}]</div>"#,
+                    html_escape(&instr_id)
+                )
+                .unwrap();
+                writeln!(html, r#"</div>"#).unwrap();
+            }
+        }
+
+        writeln!(html, r#"</div>"#).unwrap(); // end var-list
+        writeln!(html, r#"</div>"#).unwrap(); // end side-panel
+
+        // SVG container
+        writeln!(html, r#"<div class="svg-container">"#).unwrap();
         let svg = render_function_svg(func);
         writeln!(html, "{}", svg).unwrap();
+        writeln!(html, r#"</div>"#).unwrap(); // end svg-container
 
-        writeln!(html, r#"</div>"#).unwrap();
+        writeln!(html, r#"</div>"#).unwrap(); // end function-content
         writeln!(html, r#"</details>"#).unwrap();
     }
 
