@@ -9,6 +9,9 @@ pub struct ValueId(pub u32);
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BlockId(pub u32);
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InstrId(pub u32);
+
 // Types
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -76,10 +79,10 @@ pub struct FunctionIR {
 #[derive(Clone, Debug)]
 pub struct ValueInfo {
     pub ty: Type,
-    pub declared_location: Option<InstrLocation>,
-    pub use_chain: Vec<InstrLocation>,
-    pub org_name: String,   // original var name in program
-    pub debug_name: String, // debug name for debugging
+    pub declared_by: Option<InstrId>, // ID of instruction/phi that produces this value
+    pub use_chain: Vec<InstrId>,      // IDs of instructions that use this value
+    pub org_name: String,             // original var name in program
+    pub debug_name: String,           // debug name for debugging
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +99,7 @@ pub struct BasicBlock {
 
 #[derive(Clone, Debug)]
 pub struct Phi {
+    pub id: InstrId, // Unique identifier for this phi node
     pub result: ValueId,
     pub ty: Type,
     pub incomings: Vec<(BlockId, ValueId)>, // incoming block id edges into this Phi Node
@@ -104,6 +108,7 @@ pub struct Phi {
 // Instructions
 #[derive(Clone, Debug)]
 pub struct Instr {
+    pub id: InstrId, // Unique identifier for this instruction
     pub results: Vec<ValueId>,
     pub kind: InstrKind,
 }

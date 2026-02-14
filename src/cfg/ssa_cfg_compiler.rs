@@ -3,7 +3,7 @@ use super::super::parser::AST;
 use super::super::semantics::symbol_table::{Entry as SymEntry, SymbolTable, Type as SymType};
 use super::three_address_code::{
     BasicBlock, BinOp, BlockId, CastKind, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ICmpPred,
-    Instr, InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
+    Instr, InstrId, InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -50,6 +50,7 @@ pub struct SSA_CFG_Compiler {
     // ==================== ID Generators ====================
     next_value_id: u32,
     next_block_id: u32,
+    next_instr_id: u32,
 
     // ==================== Current Function State ====================
     cur_func: Option<FunctionIR>, // None when in global scope
@@ -95,6 +96,11 @@ impl SSA_CFG_Compiler {
     fn get_next_block_id(&mut self) -> u32 {
         self.next_block_id += 1;
         return self.next_block_id - 1;
+    }
+
+    fn get_next_instr_id(&mut self) -> u32 {
+        self.next_instr_id += 1;
+        return self.next_instr_id - 1;
     }
 
     // ==================== Result Getters/Setters ====================
@@ -252,7 +258,7 @@ impl SSA_CFG_Compiler {
         let id = ValueId(self.get_next_value_id());
         let info = ValueInfo {
             ty,
-            declared_location: None,
+            declared_by: None, // Will be set when instruction/phi is created
             use_chain: vec![],
             org_name: name.to_string(),
             debug_name: name.to_string(),
@@ -263,10 +269,22 @@ impl SSA_CFG_Compiler {
 
     /// Emit an instruction into the current basic block
     fn emit_instr(&mut self, results: Vec<ValueId>, kind: InstrKind) {
-        let instr = Instr { results, kind };
+        let instr_id = InstrId(self.get_next_instr_id());
+        let instr = Instr {
+            id: instr_id,
+            results: results.clone(),
+            kind,
+        };
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
             .instrs
             .push(instr);
+
+        // Set declared_by for all result values
+        for result_id in results {
+            if let Some(value_info) = self.cur_func.as_mut().unwrap().values.get_mut(&result_id) {
+                value_info.declared_by = Some(instr_id);
+            }
+        }
     }
 
     /// Read a scalar variable's current value (local: lookup, global: GlobalAddr + Load)
@@ -461,13 +479,23 @@ impl SSA_CFG_Compiler {
         let mem_incomings: Vec<(BlockId, ValueId)> =
             incomings.iter().map(|(b, m, _)| (*b, *m)).collect();
         let mem_phi = self.new_value(Type::Mem, "");
+        let mem_phi_id = InstrId(self.get_next_instr_id());
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
             .phis
             .push(Phi {
+                id: mem_phi_id,
                 result: mem_phi,
                 ty: Type::Mem,
                 incomings: mem_incomings,
             });
+        // Set declared_by for memory phi
+        self.cur_func
+            .as_mut()
+            .unwrap()
+            .values
+            .get_mut(&mem_phi)
+            .unwrap()
+            .declared_by = Some(mem_phi_id);
         self.cur_mem = mem_phi;
 
         // Variable phis
@@ -480,13 +508,23 @@ impl SSA_CFG_Compiler {
                 .ty
                 .clone();
             let var_phi = self.new_value(var_ty.clone(), var_name);
+            let var_phi_id = InstrId(self.get_next_instr_id());
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
                 .phis
                 .push(Phi {
+                    id: var_phi_id,
                     result: var_phi,
                     ty: var_ty,
                     incomings: var_incomings,
                 });
+            // Set declared_by for variable phi
+            self.cur_func
+                .as_mut()
+                .unwrap()
+                .values
+                .get_mut(&var_phi)
+                .unwrap()
+                .declared_by = Some(var_phi_id);
             self.var_to_value_id
                 .get_mut(scope_ind)
                 .unwrap()
@@ -840,14 +878,23 @@ impl Visitor for SSA_CFG_Compiler {
 
         // Memory phi for the header (entry + back-edge from update)
         let mem_phi_result = self.new_value(Type::Mem, "");
+        let mem_phi_id = InstrId(self.get_next_instr_id());
         let entry_mem = self.cur_mem;
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
             .phis
             .push(Phi {
+                id: mem_phi_id,
                 result: mem_phi_result,
                 ty: Type::Mem,
                 incomings: vec![(entry_block_id, entry_mem)],
             });
+        self.cur_func
+            .as_mut()
+            .unwrap()
+            .values
+            .get_mut(&mem_phi_result)
+            .unwrap()
+            .declared_by = Some(mem_phi_id);
         self.cur_mem = mem_phi_result;
 
         // Variable phis for all local variables currently defined
@@ -857,13 +904,22 @@ impl Visitor for SSA_CFG_Compiler {
         for (scope_ind, var_name, entry_val) in &var_entries {
             let var_ty = self.cur_func.as_ref().unwrap().values[entry_val].ty.clone();
             let phi_result = self.new_value(var_ty.clone(), var_name);
+            let phi_id = InstrId(self.get_next_instr_id());
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
                 .phis
                 .push(Phi {
+                    id: phi_id,
                     result: phi_result,
                     ty: var_ty,
                     incomings: vec![(entry_block_id, *entry_val)],
                 });
+            self.cur_func
+                .as_mut()
+                .unwrap()
+                .values
+                .get_mut(&phi_result)
+                .unwrap()
+                .declared_by = Some(phi_id);
             var_phis.push((*scope_ind, var_name.clone(), phi_result));
         }
         for (scope_ind, var_name, phi_result) in &var_phis {
@@ -1004,14 +1060,23 @@ impl Visitor for SSA_CFG_Compiler {
 
         // Memory phi for the header (entry + back-edge from body)
         let mem_phi_result = self.new_value(Type::Mem, "");
+        let mem_phi_id = InstrId(self.get_next_instr_id());
         let entry_mem = self.cur_mem;
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
             .phis
             .push(Phi {
+                id: mem_phi_id,
                 result: mem_phi_result,
                 ty: Type::Mem,
                 incomings: vec![(entry_block_id, entry_mem)],
             });
+        self.cur_func
+            .as_mut()
+            .unwrap()
+            .values
+            .get_mut(&mem_phi_result)
+            .unwrap()
+            .declared_by = Some(mem_phi_id);
         self.cur_mem = mem_phi_result;
 
         // Variable phis: for each local variable currently defined, create a phi
@@ -1023,13 +1088,22 @@ impl Visitor for SSA_CFG_Compiler {
         for (scope_ind, var_name, entry_val) in &var_entries {
             let var_ty = self.cur_func.as_ref().unwrap().values[entry_val].ty.clone();
             let phi_result = self.new_value(var_ty.clone(), var_name);
+            let phi_id = InstrId(self.get_next_instr_id());
             self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
                 .phis
                 .push(Phi {
+                    id: phi_id,
                     result: phi_result,
                     ty: var_ty,
                     incomings: vec![(entry_block_id, *entry_val)],
                 });
+            self.cur_func
+                .as_mut()
+                .unwrap()
+                .values
+                .get_mut(&phi_result)
+                .unwrap()
+                .declared_by = Some(phi_id);
             var_phis.push((*scope_ind, var_name.clone(), phi_result));
         }
         // Update var_to_value_id to point to the phi results
@@ -1700,23 +1774,41 @@ impl Visitor for SSA_CFG_Compiler {
 
                     // Boolean result phi
                     let phi_result = self.new_value(Type::I1, "logic");
+                    let phi_id = InstrId(self.get_next_instr_id());
                     self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
                         .phis
                         .push(Phi {
+                            id: phi_id,
                             result: phi_result,
                             ty: Type::I1,
                             incomings: phi_incomings,
                         });
+                    self.cur_func
+                        .as_mut()
+                        .unwrap()
+                        .values
+                        .get_mut(&phi_result)
+                        .unwrap()
+                        .declared_by = Some(phi_id);
 
                     // Memory phi to merge memory tokens from all paths
                     let mem_phi_result = self.new_value(Type::Mem, "");
+                    let mem_phi_id = InstrId(self.get_next_instr_id());
                     self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind]
                         .phis
                         .push(Phi {
+                            id: mem_phi_id,
                             result: mem_phi_result,
                             ty: Type::Mem,
                             incomings: mem_phi_incomings,
                         });
+                    self.cur_func
+                        .as_mut()
+                        .unwrap()
+                        .values
+                        .get_mut(&mem_phi_result)
+                        .unwrap()
+                        .declared_by = Some(mem_phi_id);
                     self.cur_mem = mem_phi_result;
 
                     self.set_result_value_id(phi_result);
@@ -1910,18 +2002,7 @@ impl Visitor for SSA_CFG_Compiler {
                         .insert(id_name.to_string(), ValueId(new_value_id));
 
                     // put newly declared variable in FunctionIR values map
-                    let new_value_info = ValueInfo {
-                        ty: self.result_var_type.clone(),
-                        declared_location: None,
-                        use_chain: vec![],
-                        org_name: id_name.to_string(),
-                        debug_name: id_name.to_string(),
-                    };
-                    self.cur_func
-                        .as_mut()
-                        .unwrap()
-                        .values
-                        .insert(ValueId(new_value_id), new_value_info);
+                    self.new_value(self.result_var_type.clone(), id_name);
                 }
             }
             // read: look up or load the variable's current value
@@ -2023,6 +2104,7 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
         // ID generators
         next_value_id: 0,
         next_block_id: 0,
+        next_instr_id: 0,
 
         // Function state
         cur_func: None,
