@@ -11,12 +11,15 @@ pub fn assemble(input: &std::path::PathBuf, mut writer: Box<dyn std::io::Write>,
                 Ok(symbol_table) => {
                     // create SSA form CFG
                     let ssa_cfg = compile_to_ssa_cfg(ast, symbol_table);
-
-                    // visualize the CFG
                     visualize_program_ir(&ssa_cfg);
-
-                    // generate interactive HTML CFG
                     generate_html_cfg(&ssa_cfg, "cfg_output.html");
+
+                    // TODO: run optimizations on CFG
+
+                    // code gen
+                    let mut codegen = super::codegen::CodeGenerator::new();
+                    let asm_output = codegen.generate(&ssa_cfg);
+                    write!(writer, "{}", asm_output).unwrap();
                 }
                 Err(e) => {
                     writeln!(writer, "Error in semantic analysis of file with the following errors reported: \n {:?}", e).unwrap();

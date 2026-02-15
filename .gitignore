@@ -16,7 +16,9 @@ Cargo.lock
 *._target*
 
 # IDEs
+references/
 .vscode/
+.claude/
 
 # Test Cases
 tests/
