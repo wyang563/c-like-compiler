@@ -287,6 +287,38 @@ impl SSA_CFG_Compiler {
         }
     }
 
+    /// Create block map
+    fn create_block_map(&mut self) {
+        let block_successors: Vec<(BlockId, Vec<BlockId>)> = self
+            .cur_func
+            .as_ref()
+            .unwrap()
+            .blocks
+            .iter()
+            .map(|block| {
+                let successors = match &block.term {
+                    Terminator::Br { target, .. } => vec![*target],
+                    Terminator::CBr {
+                        then_bb, else_bb, ..
+                    } => vec![*then_bb, *else_bb],
+                    Terminator::Ret { .. }
+                    | Terminator::RetVoid { .. }
+                    | Terminator::Unreachable => vec![],
+                };
+                (block.id, successors)
+            })
+            .collect();
+
+        // Now populate the map
+        for (block_id, successors) in block_successors {
+            self.cur_func
+                .as_mut()
+                .unwrap()
+                .blocks_map
+                .insert(block_id, successors);
+        }
+    }
+
     /// Read a scalar variable's current value (local: lookup, global: GlobalAddr + Load)
     fn read_scalar_var(
         &mut self,
@@ -613,6 +645,9 @@ impl Visitor for SSA_CFG_Compiler {
             let cur_node = &mut self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind];
             cur_node.term = Terminator::RetVoid { mem };
         }
+
+        // Populate blocks_map (successor map) before inserting into program IR
+        self.create_block_map();
 
         // insert into functions in program IR
         let func_ir = self.cur_func.take().unwrap();
@@ -1990,11 +2025,7 @@ impl Visitor for SSA_CFG_Compiler {
 
                     // if we are initializing a method then push the parameters as value ids
                     if self.init_method {
-                        self.cur_func
-                            .as_mut()
-                            .unwrap()
-                            .params
-                            .push(new_value_id);
+                        self.cur_func.as_mut().unwrap().params.push(new_value_id);
                     }
 
                     self.var_to_value_id
