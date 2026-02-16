@@ -7,6 +7,41 @@ use super::three_address_code::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// Process a string literal value from the parser (which includes surrounding quotes
+/// and raw escape sequences like \n, \t, \\) into actual bytes.
+fn process_string_literal(raw: &str) -> Vec<i8> {
+    // Strip surrounding quotes
+    let inner = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+        &raw[1..raw.len() - 1]
+    } else {
+        raw
+    };
+
+    let mut bytes = Vec::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => bytes.push(b'\n' as i8),
+                Some('t') => bytes.push(b'\t' as i8),
+                Some('\\') => bytes.push(b'\\' as i8),
+                Some('"') => bytes.push(b'"' as i8),
+                Some('\'') => bytes.push(b'\'' as i8),
+                Some('0') => bytes.push(0),
+                Some(other) => {
+                    // Unknown escape — emit backslash and the character
+                    bytes.push(b'\\' as i8);
+                    bytes.push(other as i8);
+                }
+                None => bytes.push(b'\\' as i8),
+            }
+        } else {
+            bytes.push(ch as i8);
+        }
+    }
+    bytes
+}
+
 /// Context information for a loop (while/for)
 /// Used by break/continue to determine jump targets
 #[derive(Clone, Debug)]
@@ -723,13 +758,13 @@ impl Visitor for SSA_CFG_Compiler {
 
         // global variable declaration case
         if is_global {
-            match var_type {
+            match &var_type {
                 Type::I32 | Type::I64 | Type::I1 => {
                     // get initializeed value if it exists
                     let global_decl = GlobalDecl {
-                        sym: Symbol(var_name),
+                        sym: Symbol(var_name.clone()),
                         kind: GlobalKind::GlobalScalar {
-                            ty: var_type,
+                            ty: var_type.clone(),
                             init: init_scalar_value,
                         },
                     };
@@ -737,9 +772,9 @@ impl Visitor for SSA_CFG_Compiler {
                 }
                 Type::Ptr(elem_ty) => {
                     let global_decl = GlobalDecl {
-                        sym: Symbol(var_name),
+                        sym: Symbol(var_name.clone()),
                         kind: GlobalKind::GlobalArray {
-                            elem_ty: *elem_ty,
+                            elem_ty: *elem_ty.clone(),
                             len: init_array_len.unwrap() as u32,
                             init: init_array_values.clone(),
                         },
@@ -752,8 +787,26 @@ impl Visitor for SSA_CFG_Compiler {
                 }
             }
         }
-        // NOTE - since I was dumb and didn't realize we can't initialize variables with values we don't need to do
-        // anything more here for the case of local variable declarations.
+        // For local array declarations, emit an Alloca instruction to allocate stack space
+        // and set the pointer value.
+        if !is_global && var_decl.is_array {
+            if let Type::Ptr(elem_ty) = &var_type {
+                let array_len = init_array_len.unwrap() as u32;
+                let var_scope_ind = self.get_var_scope_ind(&var_name);
+                let ptr_vid = *self
+                    .var_to_value_id
+                    .get(&var_scope_ind)
+                    .and_then(|scope_map| scope_map.get(&var_name))
+                    .unwrap();
+                self.emit_instr(
+                    vec![ptr_vid],
+                    InstrKind::Alloca {
+                        elem_ty: *elem_ty.clone(),
+                        count: array_len,
+                    },
+                );
+            }
+        }
     }
 
     fn visit_method_arg_decl(&mut self, method_arg_decl: &AST::MethodArgDecl) {
@@ -1500,12 +1553,7 @@ impl Visitor for SSA_CFG_Compiler {
                 AST::ASTNode::StringConstant(string_constant) => {
                     // Create a global string constant and pass its address
                     let str_name = format!(".str_{}", self.program_ir.globals.len());
-                    let mut bytes: Vec<i8> = string_constant
-                        .value
-                        .as_bytes()
-                        .iter()
-                        .map(|b| *b as i8)
-                        .collect();
+                    let mut bytes: Vec<i8> = process_string_literal(&string_constant.value);
                     bytes.push(0);
                     self.program_ir.globals.push(GlobalDecl {
                         sym: Symbol(str_name.clone()),
@@ -2069,7 +2117,12 @@ impl Visitor for SSA_CFG_Compiler {
             }
             int_value = i32::from_str_radix(int_constant_str.as_str(), 16).unwrap();
         } else {
-            int_value = int_constant.value.parse::<i32>().unwrap();
+            let parsed = int_constant.value.parse::<i64>().unwrap();
+            int_value = if int_constant.is_neg {
+                (-parsed) as i32
+            } else {
+                parsed as i32
+            };
         }
         self.result_literal_value = Some(ConstValue::I32(int_value));
     }
@@ -2085,7 +2138,12 @@ impl Visitor for SSA_CFG_Compiler {
             }
             long_value = i64::from_str_radix(long_constant_str.as_str(), 16).unwrap();
         } else {
-            long_value = long_constant.value.parse::<i64>().unwrap();
+            let parsed = long_constant.value.parse::<i64>().unwrap();
+            long_value = if long_constant.is_neg {
+                -parsed
+            } else {
+                parsed
+            };
         }
         self.result_literal_value = Some(ConstValue::I64(long_value));
     }

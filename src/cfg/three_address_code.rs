@@ -231,6 +231,14 @@ pub enum InstrKind {
         args: Vec<ValueId>,
         ret_ty: Type,
     },
+
+    /// Allocate space for a local array on the stack.
+    /// Returns a pointer to the allocated space.
+    /// %p:ptr<elem_ty> = alloca elem_ty, count
+    Alloca {
+        elem_ty: Type,
+        count: u32,
+    },
 }
 
 #[derive(Clone, Debug)]

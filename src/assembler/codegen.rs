@@ -33,6 +33,8 @@ pub struct CodeGenerator {
     next_stack_offset: i32,
     /// Total stack frame size for current function (set after allocation)
     frame_size: i32,
+    /// Map from Alloca result ValueId to the stack offset of the allocated array region
+    alloca_offsets: HashMap<ValueId, i32>,
 }
 
 impl CodeGenerator {
@@ -44,6 +46,7 @@ impl CodeGenerator {
             value_locations: HashMap::new(),
             next_stack_offset: 0,
             frame_size: 0,
+            alloca_offsets: HashMap::new(),
         }
     }
 
@@ -104,6 +107,11 @@ impl CodeGenerator {
         let label = &global.sym.0;
         match &global.kind {
             GlobalKind::GlobalStr { bytes } => {
+                // Skip import declarations — they are external symbols resolved by the linker,
+                // not data. Import symbols don't start with '.' while string literals do (e.g. .str_1).
+                if !label.starts_with('.') {
+                    return;
+                }
                 self.emit_label(label);
                 let byte_strs: Vec<String> =
                     bytes.iter().map(|b| format!("{}", *b as u8)).collect();
@@ -172,6 +180,7 @@ impl CodeGenerator {
     fn generate_function(&mut self, name: &str, func: &FunctionIR) {
         // Reset per-function state
         self.value_locations.clear();
+        self.alloca_offsets.clear();
         self.next_stack_offset = 0;
         self.frame_size = 0;
 
@@ -207,6 +216,19 @@ impl CodeGenerator {
                     self.next_stack_offset += size;
                     self.value_locations
                         .insert(*vid, Location::Stack(self.next_stack_offset));
+                }
+            }
+        }
+
+        // Scan for Alloca instructions and reserve additional stack space for local arrays
+        for block in &func.blocks {
+            for instr in &block.instrs {
+                if let InstrKind::Alloca { elem_ty, count } = &instr.kind {
+                    let array_bytes = *count as i32 * self.type_size(elem_ty);
+                    self.next_stack_offset += array_bytes;
+                    // Record the offset of the start of this array (lowest address)
+                    self.alloca_offsets
+                        .insert(instr.results[0], self.next_stack_offset);
                 }
             }
         }
@@ -274,18 +296,25 @@ impl CodeGenerator {
         let arg_regs_32 = ["%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"];
 
         for (i, param_vid) in func.params.iter().enumerate() {
-            if i >= 6 {
-                // TODO: handle stack-passed arguments (7th+)
-                todo!("stack-passed parameter {}", i);
-            }
-
             let param_ty = &func.values[param_vid].ty;
-            let (reg, suffix) = match param_ty {
-                Type::I64 | Type::Ptr(_) => (arg_regs_64[i], "q"),
-                _ => (arg_regs_32[i], "l"),
-            };
             let dest = self.value_operand(*param_vid);
-            self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
+
+            if i < 6 {
+                let (reg, suffix) = match param_ty {
+                    Type::I64 | Type::Ptr(_) => (arg_regs_64[i], "q"),
+                    _ => (arg_regs_32[i], "l"),
+                };
+                self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
+            } else {
+                // Stack-passed parameters (7th+):
+                // After pushq %rbp and the call's return address, stack layout is:
+                // +16(%rbp) = 7th arg, +24(%rbp) = 8th arg, etc.
+                let stack_offset = 16 + (i - 6) * 8;
+                let suffix = self.type_suffix(param_ty);
+                let reg = if suffix == "l" { "%eax" } else { "%rax" };
+                self.emit_instr(&format!("mov{} {}(%rbp), {}", suffix, stack_offset, reg));
+                self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
+            }
         }
     }
 
@@ -376,6 +405,9 @@ impl CodeGenerator {
             } => {
                 self.emit_call(instr, callee, args, ret_ty, func);
             }
+            InstrKind::Alloca { elem_ty, count } => {
+                self.emit_alloca(instr, elem_ty, *count);
+            }
         }
     }
 
@@ -423,9 +455,30 @@ impl CodeGenerator {
                 // imull rhs, %eax (signed multiply)
                 self.emit_instr(&format!("imul{} {}, {}", suffix, rhs_op, reg));
             }
-            BinOp::SDiv | BinOp::SRem => {
-                // Division and remainder are more complex - defer to Phase 6
-                todo!("emit_binop: div/rem not yet implemented (Phase 6)");
+            BinOp::SDiv => {
+                // Signed division: idiv divides edx:eax (or rdx:rax) by the operand
+                // Quotient goes in eax/rax, remainder in edx/rdx
+                if suffix == "l" {
+                    self.emit_instr("cltd"); // sign-extend eax into edx:eax
+                    self.emit_instr(&format!("idivl {}", rhs_op));
+                } else {
+                    self.emit_instr("cqto"); // sign-extend rax into rdx:rax
+                    self.emit_instr(&format!("idivq {}", rhs_op));
+                }
+                // Quotient is already in eax/rax
+            }
+            BinOp::SRem => {
+                // Signed remainder: same as division but result is in edx/rdx
+                if suffix == "l" {
+                    self.emit_instr("cltd");
+                    self.emit_instr(&format!("idivl {}", rhs_op));
+                    // Move remainder from edx to eax for the store below
+                    self.emit_instr("movl %edx, %eax");
+                } else {
+                    self.emit_instr("cqto");
+                    self.emit_instr(&format!("idivq {}", rhs_op));
+                    self.emit_instr("movq %rdx, %rax");
+                }
             }
         }
 
@@ -597,6 +650,18 @@ impl CodeGenerator {
         self.emit_instr(&format!("mov{} {}, (%rax)", suffix, val_reg));
     }
 
+    fn emit_alloca(&mut self, instr: &Instr, _elem_ty: &Type, _count: u32) {
+        // The stack space was pre-allocated during allocate_values.
+        // Just compute the address of the allocated region and store it in the result.
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+        let array_offset = self.alloca_offsets[&result];
+
+        // Compute address: %rbp - array_offset (this is the start of the array)
+        self.emit_instr(&format!("leaq -{}(%rbp), %rax", array_offset));
+        self.emit_instr(&format!("movq %rax, {}", dest));
+    }
+
     fn emit_call(
         &mut self,
         instr: &Instr,
@@ -622,7 +687,9 @@ impl CodeGenerator {
                 let arg_op = self.value_operand(*arg_vid);
 
                 // Get argument type from function IR
-                let arg_ty = &func.values.get(arg_vid)
+                let arg_ty = &func
+                    .values
+                    .get(arg_vid)
                     .map(|info| info.ty.clone())
                     .unwrap_or(Type::I32);
 
@@ -641,20 +708,18 @@ impl CodeGenerator {
             }
         }
 
-        // Step 2: Push stack arguments in reverse order (if any)
-        for arg_vid in stack_args.iter().rev() {
-            let arg_op = self.value_operand(*arg_vid);
-            // Assume 64-bit pushes for simplicity (can be optimized)
-            self.emit_instr(&format!("pushq {}", arg_op));
+        // Step 2: Ensure 16-byte stack alignment before pushing stack args
+        // The call instruction will push an 8-byte return address.
+        // We need (stack_args + alignment_padding + return_addr) to maintain 16-byte alignment.
+        // If we have an odd number of stack args, add 8 bytes of padding first.
+        if stack_args.len() % 2 == 1 {
+            self.emit_instr("subq $8, %rsp");
         }
 
-        // Step 3: Ensure 16-byte stack alignment
-        // The call instruction will push an 8-byte return address
-        // We need stack to be 16-byte aligned BEFORE call
-        // This is complex to get right in general, so we'll do a simple approach:
-        // If we have an odd number of stack args, push a dummy 8-byte value
-        if stack_args.len() % 2 == 1 {
-            self.emit_instr("subq $8, %rsp  # Align stack to 16 bytes");
+        // Step 3: Push stack arguments in reverse order (if any)
+        for arg_vid in stack_args.iter().rev() {
+            let arg_op = self.value_operand(*arg_vid);
+            self.emit_instr(&format!("pushq {}", arg_op));
         }
 
         // Step 4: Call the function

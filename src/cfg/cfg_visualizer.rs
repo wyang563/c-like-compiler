@@ -372,6 +372,9 @@ fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> 
         InstrKind::Len { sym } => {
             format!("len @{}", sym.0)
         }
+        InstrKind::Alloca { elem_ty, count } => {
+            format!("alloca {} x {}", format_type(elem_ty), count)
+        }
     }
 }
 
