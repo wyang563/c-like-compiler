@@ -22,6 +22,10 @@ pub struct CodeGenerator {
     /// Accumulated assembly output lines
     output: Vec<String>,
 
+    // ---- per-program state ----
+    /// Map from array symbol name to its compile-time length (populated during data section emission)
+    array_lengths: HashMap<String, u32>,
+
     // ---- per-function state (reset for each function) ----
     /// Map from ValueId to its runtime location
     value_locations: HashMap<ValueId, Location>,
@@ -35,6 +39,7 @@ impl CodeGenerator {
     pub fn new() -> Self {
         CodeGenerator {
             output: Vec::new(),
+            array_lengths: HashMap::new(),
             value_locations: HashMap::new(),
             next_stack_offset: 0,
             frame_size: 0,
@@ -90,22 +95,56 @@ impl CodeGenerator {
     fn emit_global_decl(&mut self, global: &GlobalDecl) {
         let label = &global.sym.0;
         match &global.kind {
-            GlobalKind::GlobalStr { bytes: _ } => {
-                // TODO: emit string bytes as .byte directives
-                todo!("emit GlobalStr for {}", label);
+            GlobalKind::GlobalStr { bytes } => {
+                self.emit_label(label);
+                let byte_strs: Vec<String> =
+                    bytes.iter().map(|b| format!("{}", *b as u8)).collect();
+                self.emit_instr(&format!(".byte {}", byte_strs.join(", ")));
             }
-            GlobalKind::GlobalScalar { ty: _, init: _ } => {
-                // TODO: emit scalar with .long/.quad and optional init value
-                todo!("emit GlobalScalar for {}", label);
+            GlobalKind::GlobalScalar { ty, init } => {
+                self.emit_label(label);
+                let directive = self.data_directive(ty);
+                match init {
+                    Some(cv) => {
+                        self.emit_instr(&format!("{} {}", directive, self.const_value_int(cv)))
+                    }
+                    None => self.emit_instr(&format!("{} 0", directive)),
+                }
             }
-            GlobalKind::GlobalArray {
-                elem_ty: _,
-                len: _,
-                init: _,
-            } => {
-                // TODO: emit array with repeated .long/.quad entries or .zero
-                todo!("emit GlobalArray for {}", label);
+            GlobalKind::GlobalArray { elem_ty, len, init } => {
+                self.array_lengths.insert(label.to_string(), *len);
+                self.emit_label(label);
+                match init {
+                    Some(values) => {
+                        let directive = self.data_directive(elem_ty);
+                        for cv in values {
+                            self.emit_instr(&format!("{} {}", directive, self.const_value_int(cv)));
+                        }
+                    }
+                    None => {
+                        let total_bytes = *len as i32 * self.type_size(elem_ty);
+                        self.emit_instr(&format!(".zero {}", total_bytes));
+                    }
+                }
             }
+        }
+    }
+
+    /// Return the appropriate data directive for a type (.long for 32-bit, .quad for 64-bit)
+    fn data_directive(&self, ty: &Type) -> &'static str {
+        match ty {
+            Type::I1 | Type::I8 | Type::I32 => ".long",
+            Type::I64 | Type::Ptr(_) => ".quad",
+            _ => ".long",
+        }
+    }
+
+    /// Extract the integer value from a ConstValue
+    fn const_value_int(&self, cv: &ConstValue) -> i64 {
+        match cv {
+            ConstValue::I1(b) => *b as i64,
+            ConstValue::I32(n) => *n as i64,
+            ConstValue::I64(n) => *n,
         }
     }
 
@@ -156,7 +195,7 @@ impl CodeGenerator {
                 // Mem tokens and Void don't need storage
                 Type::Mem | Type::Void | Type::None => continue,
                 ty => {
-                    let size = Self::type_size(ty);
+                    let size = self.type_size(ty);
                     self.next_stack_offset += size;
                     self.value_locations
                         .insert(*vid, Location::Stack(self.next_stack_offset));
@@ -169,7 +208,7 @@ impl CodeGenerator {
     }
 
     /// Return the size in bytes for a given IR type
-    fn type_size(ty: &Type) -> i32 {
+    fn type_size(&self, ty: &Type) -> i32 {
         match ty {
             Type::I1 => 4, // store bools as 4 bytes for alignment
             Type::I8 => 4, // pad to 4 bytes for alignment
@@ -194,7 +233,7 @@ impl CodeGenerator {
     }
 
     /// Return the AT&T instruction suffix for a type ("l" for 32-bit, "q" for 64-bit)
-    fn type_suffix(ty: &Type) -> &'static str {
+    fn type_suffix(&self, ty: &Type) -> &'static str {
         match ty {
             Type::I1 | Type::I8 | Type::I32 => "l",
             Type::I64 | Type::Ptr(_) => "q",
@@ -252,7 +291,7 @@ impl CodeGenerator {
     /// Emit a complete basic block: label, phis, instructions, terminator
     fn emit_block(&mut self, func_name: &str, block: &BasicBlock, func: &FunctionIR) {
         // Block label
-        self.emit_label(&Self::block_label(func_name, block.id));
+        self.emit_label(&self.block_label(func_name, block.id));
 
         // Phi nodes (handled by predecessor copies -- see emit_phi_copies)
         // Nothing emitted here; phi resolution happens at predecessor block ends
@@ -267,8 +306,8 @@ impl CodeGenerator {
     }
 
     /// Generate a label string for a block
-    fn block_label(func_name: &str, block_id: BlockId) -> String {
-        format!(".L_{}_bb{}", func_name, block_id.0)
+    fn block_label(&self, func_name: &str, block_id: BlockId) -> String {
+        format!(".{}_bb{}", func_name, block_id.0)
     }
 
     // ==================== Instruction Emission ====================
@@ -347,14 +386,7 @@ impl CodeGenerator {
         todo!("emit_const");
     }
 
-    fn emit_binop(
-        &mut self,
-        _instr: &Instr,
-        _op: BinOp,
-        _ty: &Type,
-        _lhs: ValueId,
-        _rhs: ValueId,
-    ) {
+    fn emit_binop(&mut self, _instr: &Instr, _op: BinOp, _ty: &Type, _lhs: ValueId, _rhs: ValueId) {
         // TODO: movl -off(%rbp), %eax; addl -off(%rbp), %eax; movl %eax, -off(%rbp)
         // NOTE: idiv is special -- needs cltd/cqto setup, result in %eax (quot) or %edx (rem)
         todo!("emit_binop");
@@ -398,13 +430,7 @@ impl CodeGenerator {
         todo!("emit_global_str_addr");
     }
 
-    fn emit_elem_addr(
-        &mut self,
-        _instr: &Instr,
-        _elem_ty: &Type,
-        _base: ValueId,
-        _index: ValueId,
-    ) {
+    fn emit_elem_addr(&mut self, _instr: &Instr, _elem_ty: &Type, _base: ValueId, _index: ValueId) {
         // TODO: movq -off(%rbp), %rax; movslq -off(%rbp), %rcx; leaq (%rax,%rcx,4), %rax; movq %rax, -off(%rbp)
         todo!("emit_elem_addr");
     }
@@ -445,10 +471,7 @@ impl CodeGenerator {
     fn emit_terminator(&mut self, func_name: &str, term: &Terminator, _func: &FunctionIR) {
         match term {
             Terminator::Br { target, .. } => {
-                self.emit_instr(&format!(
-                    "jmp {}",
-                    Self::block_label(func_name, *target)
-                ));
+                self.emit_instr(&format!("jmp {}", self.block_label(func_name, *target)));
             }
             Terminator::CBr {
                 cond: _,

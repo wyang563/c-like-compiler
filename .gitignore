@@ -24,6 +24,7 @@ references/
 tests/
 tests24/
 out.txt
+*.out*
 out_unit.txt
 
 # Text files 
