@@ -12,8 +12,6 @@ use super::super::cfg::three_address_code::{
 pub enum Location {
     /// Stack slot at -offset(%rbp)
     Stack(i32),
-    /// A compile-time constant (no storage needed, can emit as immediate)
-    Immediate(ConstValue),
 }
 
 // ==================== Code Generator ====================
@@ -233,11 +231,6 @@ impl CodeGenerator {
     fn value_operand(&self, vid: ValueId) -> String {
         match self.value_locations.get(&vid) {
             Some(Location::Stack(offset)) => format!("-{}(%rbp)", offset),
-            Some(Location::Immediate(cv)) => match cv {
-                ConstValue::I1(b) => format!("${}", *b as i32),
-                ConstValue::I32(n) => format!("${}", n),
-                ConstValue::I64(n) => format!("${}", n),
-            },
             None => panic!("ValueId {:?} has no allocated location", vid),
         }
     }
@@ -323,7 +316,7 @@ impl CodeGenerator {
     // ==================== Instruction Emission ====================
 
     /// Emit assembly for a single IR instruction
-    fn emit_instruction(&mut self, instr: &Instr, _func: &FunctionIR) {
+    fn emit_instruction(&mut self, instr: &Instr, func: &FunctionIR) {
         match &instr.kind {
             InstrKind::Const(cv) => {
                 self.emit_const(instr, cv);
@@ -365,7 +358,7 @@ impl CodeGenerator {
                 addr,
                 value,
             } => {
-                self.emit_store(instr, ty, *addr, *value);
+                self.emit_store(ty, *addr, *value);
             }
             InstrKind::Call {
                 mem: _,
@@ -373,7 +366,7 @@ impl CodeGenerator {
                 args,
                 ret_ty,
             } => {
-                self.emit_call(instr, callee, args, ret_ty, false);
+                self.emit_call(instr, callee, args, ret_ty, func);
             }
             InstrKind::CallImport {
                 mem: _,
@@ -381,7 +374,7 @@ impl CodeGenerator {
                 args,
                 ret_ty,
             } => {
-                self.emit_call(instr, callee, args, ret_ty, true);
+                self.emit_call(instr, callee, args, ret_ty, func);
             }
         }
     }
@@ -587,7 +580,7 @@ impl CodeGenerator {
         self.emit_instr(&format!("mov{} {}, {}", suffix, val_reg, dest));
     }
 
-    fn emit_store(&mut self, _instr: &Instr, ty: &Type, addr: ValueId, value: ValueId) {
+    fn emit_store(&mut self, ty: &Type, addr: ValueId, value: ValueId) {
         // Store a value to memory at the given address
         // Store doesn't produce a value result (only mem_out)
         let addr_op = self.value_operand(addr);
@@ -606,18 +599,86 @@ impl CodeGenerator {
 
     fn emit_call(
         &mut self,
-        _instr: &Instr,
-        _callee: &Symbol,
-        _args: &[ValueId],
-        _ret_ty: &Type,
-        _is_import: bool,
+        instr: &Instr,
+        callee: &Symbol,
+        args: &[ValueId],
+        ret_ty: &Type,
+        func: &FunctionIR,
     ) {
-        // TODO:
-        // 1. Move args into %rdi, %rsi, %rdx, %rcx, %r8, %r9 (or pushq for 7th+)
-        // 2. Ensure 16-byte stack alignment before call
-        // 3. call <callee>
-        // 4. movl %eax, -off(%rbp)  (if non-void)
-        todo!("emit_call");
+        // System V ABI calling convention:
+        // First 6 integer args in: %rdi, %rsi, %rdx, %rcx, %r8, %r9
+        // Additional args pushed on stack in reverse order
+        // Return value in %rax/%eax
+        // Stack must be 16-byte aligned before call
+
+        let arg_regs_64 = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
+        let arg_regs_32 = ["%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"];
+
+        // Step 1: Move arguments into registers or prepare for stack
+        let mut stack_args = Vec::new();
+        for (i, arg_vid) in args.iter().enumerate() {
+            if i < 6 {
+                // First 6 args go in registers
+                let arg_op = self.value_operand(*arg_vid);
+
+                // Get argument type from function IR
+                let arg_ty = &func.values.get(arg_vid)
+                    .map(|info| info.ty.clone())
+                    .unwrap_or(Type::I32);
+
+                // Determine if we need 32-bit or 64-bit register
+                let suffix = self.type_suffix(arg_ty);
+                let reg = if suffix == "l" {
+                    arg_regs_32[i]
+                } else {
+                    arg_regs_64[i]
+                };
+
+                self.emit_instr(&format!("mov{} {}, {}", suffix, arg_op, reg));
+            } else {
+                // 7+ args go on stack (pushed in reverse order later)
+                stack_args.push(*arg_vid);
+            }
+        }
+
+        // Step 2: Push stack arguments in reverse order (if any)
+        for arg_vid in stack_args.iter().rev() {
+            let arg_op = self.value_operand(*arg_vid);
+            // Assume 64-bit pushes for simplicity (can be optimized)
+            self.emit_instr(&format!("pushq {}", arg_op));
+        }
+
+        // Step 3: Ensure 16-byte stack alignment
+        // The call instruction will push an 8-byte return address
+        // We need stack to be 16-byte aligned BEFORE call
+        // This is complex to get right in general, so we'll do a simple approach:
+        // If we have an odd number of stack args, push a dummy 8-byte value
+        if stack_args.len() % 2 == 1 {
+            self.emit_instr("subq $8, %rsp  # Align stack to 16 bytes");
+        }
+
+        // Step 4: Call the function
+        self.emit_instr(&format!("call {}", callee.0));
+
+        // Step 5: Clean up stack arguments (if any)
+        let stack_bytes = stack_args.len() * 8;
+        let alignment_bytes = if stack_args.len() % 2 == 1 { 8 } else { 0 };
+        if stack_bytes + alignment_bytes > 0 {
+            self.emit_instr(&format!("addq ${}, %rsp", stack_bytes + alignment_bytes));
+        }
+
+        // Step 6: Store return value (if non-void)
+        if !matches!(ret_ty, Type::Void) {
+            let suffix = self.type_suffix(ret_ty);
+            let reg = if suffix == "l" { "%eax" } else { "%rax" };
+
+            // For non-void calls, result is: [mem_out, return_value]
+            if instr.results.len() > 1 {
+                let ret_result = instr.results[1];
+                let dest = self.value_operand(ret_result);
+                self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
+            }
+        }
     }
 
     // ==================== Terminator Emission ====================
@@ -633,7 +694,7 @@ impl CodeGenerator {
             Terminator::Br { target, .. } => {
                 // Emit phi copies for the target block, then jump
                 let target_bb = &func.blocks[func.block_id_to_ind[target]];
-                self.emit_phi_copies(from_block, target_bb, func);
+                self.emit_phi_copies(from_block, target_bb);
                 self.emit_instr(&format!("jmp {}", self.block_label(func_name, *target)));
             }
             Terminator::CBr {
@@ -652,13 +713,13 @@ impl CodeGenerator {
 
                 // Fall-through: else path — phi copies then jump
                 let else_target = &func.blocks[func.block_id_to_ind[else_bb]];
-                self.emit_phi_copies(from_block, else_target, func);
+                self.emit_phi_copies(from_block, else_target);
                 self.emit_instr(&format!("jmp {}", self.block_label(func_name, *else_bb)));
 
                 // Then path — phi copies then jump
                 self.emit_label(&then_label);
                 let then_target = &func.blocks[func.block_id_to_ind[then_bb]];
-                self.emit_phi_copies(from_block, then_target, func);
+                self.emit_phi_copies(from_block, then_target);
                 self.emit_instr(&format!("jmp {}", self.block_label(func_name, *then_bb)));
             }
             Terminator::Ret { value, .. } => {
@@ -683,7 +744,7 @@ impl CodeGenerator {
 
     /// Emit copies for phi resolution at the end of a predecessor block.
     /// Called before the terminator jump to patch phi incomings in the successor.
-    fn emit_phi_copies(&mut self, from_block: BlockId, to_block: &BasicBlock, _func: &FunctionIR) {
+    fn emit_phi_copies(&mut self, from_block: BlockId, to_block: &BasicBlock) {
         for phi in &to_block.phis {
             // Skip mem-typed phis (shouldn't appear in phis vec, but be safe)
             if matches!(phi.ty, Type::Mem | Type::Void | Type::None) {
