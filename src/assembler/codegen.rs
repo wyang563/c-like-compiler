@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::super::cfg::three_address_code::{
     BasicBlock, BinOp, BlockId, CastKind, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ICmpPred,
-    Instr, InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId,
+    Instr, InstrKind, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId,
 };
 
 // ==================== Location Tracking ====================
@@ -381,33 +381,124 @@ impl CodeGenerator {
 
     // ---- Individual instruction emitters ----
 
-    fn emit_const(&mut self, _instr: &Instr, _cv: &ConstValue) {
-        // TODO: movl $imm, -offset(%rbp)  or  movq $imm, -offset(%rbp)
-        todo!("emit_const");
+    fn emit_const(&mut self, instr: &Instr, cv: &ConstValue) {
+        // Get the destination location (stack slot)
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+
+        // Determine instruction suffix based on constant type
+        let (suffix, imm) = match cv {
+            ConstValue::I1(b) => ("l", *b as i64),
+            ConstValue::I32(n) => ("l", *n as i64),
+            ConstValue::I64(n) => ("q", *n),
+        };
+
+        // Emit: movl/movq $imm, -offset(%rbp)
+        self.emit_instr(&format!("mov{} ${}, {}", suffix, imm, dest));
     }
 
-    fn emit_binop(&mut self, _instr: &Instr, _op: BinOp, _ty: &Type, _lhs: ValueId, _rhs: ValueId) {
-        // TODO: movl -off(%rbp), %eax; addl -off(%rbp), %eax; movl %eax, -off(%rbp)
-        // NOTE: idiv is special -- needs cltd/cqto setup, result in %eax (quot) or %edx (rem)
-        todo!("emit_binop");
+    fn emit_binop(&mut self, instr: &Instr, op: BinOp, ty: &Type, lhs: ValueId, rhs: ValueId) {
+        let suffix = self.type_suffix(ty);
+        let reg = if suffix == "l" { "%eax" } else { "%rax" };
+
+        let lhs_op = self.value_operand(lhs);
+        let rhs_op = self.value_operand(rhs);
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+
+        // Load lhs into register
+        self.emit_instr(&format!("mov{} {}, {}", suffix, lhs_op, reg));
+
+        // Perform operation with rhs
+        match op {
+            BinOp::Add => {
+                // addl rhs, %eax
+                self.emit_instr(&format!("add{} {}, {}", suffix, rhs_op, reg));
+            }
+            BinOp::Sub => {
+                // subl rhs, %eax
+                self.emit_instr(&format!("sub{} {}, {}", suffix, rhs_op, reg));
+            }
+            BinOp::Mul => {
+                // imull rhs, %eax (signed multiply)
+                self.emit_instr(&format!("imul{} {}, {}", suffix, rhs_op, reg));
+            }
+            BinOp::SDiv | BinOp::SRem => {
+                // Division and remainder are more complex - defer to Phase 6
+                todo!("emit_binop: div/rem not yet implemented (Phase 6)");
+            }
+        }
+
+        // Store result
+        self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
     }
 
-    fn emit_unop(&mut self, _instr: &Instr, _op: UnOp, _ty: &Type, _arg: ValueId) {
-        // TODO: movl -off(%rbp), %eax; negl %eax; movl %eax, -off(%rbp)
-        // For bool NOT: xorl $1, %eax
-        todo!("emit_unop");
+    fn emit_unop(&mut self, instr: &Instr, op: UnOp, ty: &Type, arg: ValueId) {
+        let suffix = self.type_suffix(ty);
+        let reg = if suffix == "l" { "%eax" } else { "%rax" };
+
+        let arg_op = self.value_operand(arg);
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+
+        // Load arg into register
+        self.emit_instr(&format!("mov{} {}, {}", suffix, arg_op, reg));
+
+        // Perform operation
+        match op {
+            UnOp::Neg => {
+                // negl %eax (arithmetic negation)
+                self.emit_instr(&format!("neg{} {}", suffix, reg));
+            }
+            UnOp::Not => {
+                // Boolean NOT: xor with 1 (flips 0<->1)
+                // Use 32-bit operation for bools
+                self.emit_instr("xorl $1, %eax");
+            }
+        }
+
+        // Store result
+        self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
     }
 
     fn emit_icmp(
         &mut self,
-        _instr: &Instr,
-        _pred: ICmpPred,
-        _ty: &Type,
-        _lhs: ValueId,
-        _rhs: ValueId,
+        instr: &Instr,
+        pred: ICmpPred,
+        ty: &Type,
+        lhs: ValueId,
+        rhs: ValueId,
     ) {
-        // TODO: movl -off(%rbp), %eax; cmpl -off(%rbp), %eax; sete %al; movzbl %al, %eax; movl %eax, -off(%rbp)
-        todo!("emit_icmp");
+        let suffix = self.type_suffix(ty);
+        let reg = if suffix == "l" { "%eax" } else { "%rax" };
+
+        let lhs_op = self.value_operand(lhs);
+        let rhs_op = self.value_operand(rhs);
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+
+        // Load lhs into register
+        self.emit_instr(&format!("mov{} {}, {}", suffix, lhs_op, reg));
+
+        // Compare with rhs (AT&T syntax: cmpl rhs, lhs)
+        self.emit_instr(&format!("cmp{} {}, {}", suffix, rhs_op, reg));
+
+        // Set byte based on condition code
+        let setcc = match pred {
+            ICmpPred::Eq => "sete",   // set if equal
+            ICmpPred::Ne => "setne",  // set if not equal
+            ICmpPred::Lt => "setl",   // set if less (signed)
+            ICmpPred::Le => "setle",  // set if less or equal (signed)
+            ICmpPred::Gt => "setg",   // set if greater (signed)
+            ICmpPred::Ge => "setge",  // set if greater or equal (signed)
+        };
+        self.emit_instr(&format!("{} %al", setcc));
+
+        // Zero-extend byte to 32-bit (result is i1/bool, stored as 32-bit)
+        self.emit_instr("movzbl %al, %eax");
+
+        // Store result (always 32-bit for bools)
+        self.emit_instr(&format!("movl %eax, {}", dest));
     }
 
     fn emit_cast(&mut self, _instr: &Instr, _kind: CastKind, _src: ValueId) {
