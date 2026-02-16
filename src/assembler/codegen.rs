@@ -21,6 +21,8 @@ pub enum Location {
 pub struct CodeGenerator {
     /// Accumulated assembly output lines
     output: Vec<String>,
+    /// Counter for generating unique internal labels
+    label_counter: u32,
 
     // ---- per-program state ----
     /// Map from array symbol name to its compile-time length (populated during data section emission)
@@ -39,6 +41,7 @@ impl CodeGenerator {
     pub fn new() -> Self {
         CodeGenerator {
             output: Vec::new(),
+            label_counter: 0,
             array_lengths: HashMap::new(),
             value_locations: HashMap::new(),
             next_stack_offset: 0,
@@ -78,6 +81,13 @@ impl CodeGenerator {
     /// Emit a comment
     fn emit_comment(&mut self, comment: &str) {
         self.output.push(format!("    # {}", comment));
+    }
+
+    /// Generate a unique internal label
+    fn fresh_label(&mut self, prefix: &str) -> String {
+        let label = format!(".L{}_{}", prefix, self.label_counter);
+        self.label_counter += 1;
+        label
     }
 
     // ==================== Top-Level Sections ====================
@@ -301,8 +311,8 @@ impl CodeGenerator {
             self.emit_instruction(instr, func);
         }
 
-        // Terminator
-        self.emit_terminator(func_name, &block.term, func);
+        // Terminator (pass block id for phi resolution in successors)
+        self.emit_terminator(func_name, block.id, &block.term, func);
     }
 
     /// Generate a label string for a block
@@ -461,14 +471,7 @@ impl CodeGenerator {
         self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
     }
 
-    fn emit_icmp(
-        &mut self,
-        instr: &Instr,
-        pred: ICmpPred,
-        ty: &Type,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) {
+    fn emit_icmp(&mut self, instr: &Instr, pred: ICmpPred, ty: &Type, lhs: ValueId, rhs: ValueId) {
         let suffix = self.type_suffix(ty);
         let reg = if suffix == "l" { "%eax" } else { "%rax" };
 
@@ -485,12 +488,12 @@ impl CodeGenerator {
 
         // Set byte based on condition code
         let setcc = match pred {
-            ICmpPred::Eq => "sete",   // set if equal
-            ICmpPred::Ne => "setne",  // set if not equal
-            ICmpPred::Lt => "setl",   // set if less (signed)
-            ICmpPred::Le => "setle",  // set if less or equal (signed)
-            ICmpPred::Gt => "setg",   // set if greater (signed)
-            ICmpPred::Ge => "setge",  // set if greater or equal (signed)
+            ICmpPred::Eq => "sete",  // set if equal
+            ICmpPred::Ne => "setne", // set if not equal
+            ICmpPred::Lt => "setl",  // set if less (signed)
+            ICmpPred::Le => "setle", // set if less or equal (signed)
+            ICmpPred::Gt => "setg",  // set if greater (signed)
+            ICmpPred::Ge => "setge", // set if greater or equal (signed)
         };
         self.emit_instr(&format!("{} %al", setcc));
 
@@ -559,29 +562,58 @@ impl CodeGenerator {
 
     // ==================== Terminator Emission ====================
 
-    fn emit_terminator(&mut self, func_name: &str, term: &Terminator, _func: &FunctionIR) {
+    fn emit_terminator(
+        &mut self,
+        func_name: &str,
+        from_block: BlockId,
+        term: &Terminator,
+        func: &FunctionIR,
+    ) {
         match term {
             Terminator::Br { target, .. } => {
+                // Emit phi copies for the target block, then jump
+                let target_bb = &func.blocks[func.block_id_to_ind[target]];
+                self.emit_phi_copies(from_block, target_bb, func);
                 self.emit_instr(&format!("jmp {}", self.block_label(func_name, *target)));
             }
             Terminator::CBr {
-                cond: _,
-                then_bb: _,
-                else_bb: _,
+                cond,
+                then_bb,
+                else_bb,
                 ..
             } => {
-                // TODO: movl -off(%rbp), %eax; testl %eax, %eax; jne .L_then; jmp .L_else
-                todo!("emit CBr terminator");
+                let cond_op = self.value_operand(*cond);
+                let then_label = self.fresh_label("then");
+
+                // Test the condition
+                self.emit_instr(&format!("movl {}, %eax", cond_op));
+                self.emit_instr("testl %eax, %eax");
+                self.emit_instr(&format!("jne {}", then_label));
+
+                // Fall-through: else path — phi copies then jump
+                let else_target = &func.blocks[func.block_id_to_ind[else_bb]];
+                self.emit_phi_copies(from_block, else_target, func);
+                self.emit_instr(&format!("jmp {}", self.block_label(func_name, *else_bb)));
+
+                // Then path — phi copies then jump
+                self.emit_label(&then_label);
+                let then_target = &func.blocks[func.block_id_to_ind[then_bb]];
+                self.emit_phi_copies(from_block, then_target, func);
+                self.emit_instr(&format!("jmp {}", self.block_label(func_name, *then_bb)));
             }
-            Terminator::Ret { value: _, .. } => {
-                // TODO: movl -off(%rbp), %eax; epilogue; ret
-                todo!("emit Ret terminator");
+            Terminator::Ret { value, .. } => {
+                // Load the return value into %eax (i32) or %rax (i64)
+                let val_ty = &func.values[value].ty;
+                let suffix = self.type_suffix(val_ty);
+                let reg = if suffix == "l" { "%eax" } else { "%rax" };
+                let val_op = self.value_operand(*value);
+                self.emit_instr(&format!("mov{} {}, {}", suffix, val_op, reg));
+                self.emit_epilogue();
             }
             Terminator::RetVoid { .. } => {
                 self.emit_epilogue();
             }
             Terminator::Unreachable => {
-                // Should not be reached in well-formed IR
                 self.emit_comment("unreachable");
             }
         }
@@ -591,15 +623,27 @@ impl CodeGenerator {
 
     /// Emit copies for phi resolution at the end of a predecessor block.
     /// Called before the terminator jump to patch phi incomings in the successor.
-    fn emit_phi_copies(
-        &mut self,
-        _from_block: BlockId,
-        _to_block: &BasicBlock,
-        _func: &FunctionIR,
-    ) {
-        // TODO: for each phi in to_block, find the incoming for from_block,
-        // load the incoming value into a register, store it to the phi result's location
-        // e.g. movl -off(%rbp), %eax; movl %eax, -off(%rbp)
-        todo!("emit_phi_copies");
+    fn emit_phi_copies(&mut self, from_block: BlockId, to_block: &BasicBlock, _func: &FunctionIR) {
+        for phi in &to_block.phis {
+            // Skip mem-typed phis (shouldn't appear in phis vec, but be safe)
+            if matches!(phi.ty, Type::Mem | Type::Void | Type::None) {
+                continue;
+            }
+
+            // Find the incoming value for our predecessor block
+            for (block_id, value_id) in &phi.incomings {
+                if *block_id == from_block {
+                    let suffix = self.type_suffix(&phi.ty);
+                    let reg = if suffix == "l" { "%eax" } else { "%rax" };
+                    let src = self.value_operand(*value_id);
+                    let dest = self.value_operand(phi.result);
+
+                    // Copy: load incoming value into register, store to phi result slot
+                    self.emit_instr(&format!("mov{} {}, {}", suffix, src, reg));
+                    self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
+                    break;
+                }
+            }
+        }
     }
 }
