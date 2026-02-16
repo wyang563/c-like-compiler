@@ -10,7 +10,7 @@ use super::super::cfg::three_address_code::{
 /// Where a ValueId lives at runtime
 #[derive(Clone, Debug)]
 pub enum Location {
-    /// Stack slot at [rbp - offset]
+    /// Stack slot at -offset(%rbp)
     Stack(i32),
     /// A compile-time constant (no storage needed, can emit as immediate)
     Immediate(ConstValue),
@@ -43,7 +43,6 @@ impl CodeGenerator {
 
     /// Top-level entry point: generate assembly for the entire program
     pub fn generate(&mut self, program: &ProgramIR) -> String {
-        self.emit_prelude();
         self.emit_data_section(program);
         self.emit_text_section(program);
         self.output.join("\n")
@@ -73,16 +72,10 @@ impl CodeGenerator {
 
     /// Emit a comment
     fn emit_comment(&mut self, comment: &str) {
-        self.output.push(format!("    ; {}", comment));
+        self.output.push(format!("    # {}", comment));
     }
 
     // ==================== Top-Level Sections ====================
-
-    /// Emit assembler directives at the top of the file
-    fn emit_prelude(&mut self) {
-        self.emit(".intel_syntax noprefix");
-        self.emit_blank();
-    }
 
     /// Emit the .data section for global variables and string literals
     fn emit_data_section(&mut self, program: &ProgramIR) {
@@ -97,15 +90,19 @@ impl CodeGenerator {
     fn emit_global_decl(&mut self, global: &GlobalDecl) {
         let label = &global.sym.0;
         match &global.kind {
-            GlobalKind::GlobalStr { bytes } => {
+            GlobalKind::GlobalStr { bytes: _ } => {
                 // TODO: emit string bytes as .byte directives
                 todo!("emit GlobalStr for {}", label);
             }
-            GlobalKind::GlobalScalar { ty, init } => {
+            GlobalKind::GlobalScalar { ty: _, init: _ } => {
                 // TODO: emit scalar with .long/.quad and optional init value
                 todo!("emit GlobalScalar for {}", label);
             }
-            GlobalKind::GlobalArray { elem_ty, len, init } => {
+            GlobalKind::GlobalArray {
+                elem_ty: _,
+                len: _,
+                init: _,
+            } => {
                 // TODO: emit array with repeated .long/.quad entries or .zero
                 todo!("emit GlobalArray for {}", label);
             }
@@ -183,25 +180,25 @@ impl CodeGenerator {
         }
     }
 
-    /// Return the operand string for accessing a ValueId's location (e.g., "[rbp-8]")
+    /// Return the AT&T operand string for accessing a ValueId's location (e.g., "-8(%rbp)")
     fn value_operand(&self, vid: ValueId) -> String {
         match self.value_locations.get(&vid) {
-            Some(Location::Stack(offset)) => format!("[rbp-{}]", offset),
+            Some(Location::Stack(offset)) => format!("-{}(%rbp)", offset),
             Some(Location::Immediate(cv)) => match cv {
-                ConstValue::I1(b) => format!("{}", *b as i32),
-                ConstValue::I32(n) => format!("{}", n),
-                ConstValue::I64(n) => format!("{}", n),
+                ConstValue::I1(b) => format!("${}", *b as i32),
+                ConstValue::I32(n) => format!("${}", n),
+                ConstValue::I64(n) => format!("${}", n),
             },
             None => panic!("ValueId {:?} has no allocated location", vid),
         }
     }
 
-    /// Return the size qualifier for a type ("dword" for 32-bit, "qword" for 64-bit)
-    fn size_qualifier(ty: &Type) -> &'static str {
+    /// Return the AT&T instruction suffix for a type ("l" for 32-bit, "q" for 64-bit)
+    fn type_suffix(ty: &Type) -> &'static str {
         match ty {
-            Type::I1 | Type::I8 | Type::I32 => "dword",
-            Type::I64 | Type::Ptr(_) => "qword",
-            _ => "dword",
+            Type::I1 | Type::I8 | Type::I32 => "l",
+            Type::I64 | Type::Ptr(_) => "q",
+            _ => "l",
         }
     }
 
@@ -215,24 +212,24 @@ impl CodeGenerator {
 
     /// Emit function prologue: save rbp, set up frame, allocate stack space
     fn emit_prologue(&mut self) {
-        self.emit_instr("push rbp");
-        self.emit_instr("mov rbp, rsp");
+        self.emit_instr("pushq %rbp");
+        self.emit_instr("movq %rsp, %rbp");
         if self.frame_size > 0 {
-            self.emit_instr(&format!("sub rsp, {}", self.frame_size));
+            self.emit_instr(&format!("subq ${}, %rsp", self.frame_size));
         }
     }
 
     /// Emit function epilogue: restore rsp/rbp, return
     fn emit_epilogue(&mut self) {
-        self.emit_instr("mov rsp, rbp");
-        self.emit_instr("pop rbp");
+        self.emit_instr("movq %rbp, %rsp");
+        self.emit_instr("popq %rbp");
         self.emit_instr("ret");
     }
 
     /// Move function parameters from argument registers into their stack slots
     fn emit_param_moves(&mut self, func: &FunctionIR) {
-        let arg_regs_64 = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
-        let arg_regs_32 = ["edi", "esi", "edx", "ecx", "r8d", "r9d"];
+        let arg_regs_64 = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
+        let arg_regs_32 = ["%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"];
 
         for (i, param_vid) in func.params.iter().enumerate() {
             if i >= 6 {
@@ -241,13 +238,12 @@ impl CodeGenerator {
             }
 
             let param_ty = &func.values[param_vid].ty;
-            let reg = match param_ty {
-                Type::I64 | Type::Ptr(_) => arg_regs_64[i],
-                _ => arg_regs_32[i],
+            let (reg, suffix) = match param_ty {
+                Type::I64 | Type::Ptr(_) => (arg_regs_64[i], "q"),
+                _ => (arg_regs_32[i], "l"),
             };
             let dest = self.value_operand(*param_vid);
-            let qual = Self::size_qualifier(param_ty);
-            self.emit_instr(&format!("mov {} {}, {}", qual, dest, reg));
+            self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
         }
     }
 
@@ -278,7 +274,7 @@ impl CodeGenerator {
     // ==================== Instruction Emission ====================
 
     /// Emit assembly for a single IR instruction
-    fn emit_instruction(&mut self, instr: &Instr, func: &FunctionIR) {
+    fn emit_instruction(&mut self, instr: &Instr, _func: &FunctionIR) {
         match &instr.kind {
             InstrKind::Const(cv) => {
                 self.emit_const(instr, cv);
@@ -314,19 +310,19 @@ impl CodeGenerator {
             InstrKind::Len { sym } => {
                 self.emit_len(instr, sym);
             }
-            InstrKind::Load { ty, mem, addr } => {
+            InstrKind::Load { ty, mem: _, addr } => {
                 self.emit_load(instr, ty, *addr);
             }
             InstrKind::Store {
                 ty,
-                mem,
+                mem: _,
                 addr,
                 value,
             } => {
                 self.emit_store(instr, ty, *addr, *value);
             }
             InstrKind::Call {
-                mem,
+                mem: _,
                 callee,
                 args,
                 ret_ty,
@@ -334,7 +330,7 @@ impl CodeGenerator {
                 self.emit_call(instr, callee, args, ret_ty, false);
             }
             InstrKind::CallImport {
-                mem,
+                mem: _,
                 callee,
                 args,
                 ret_ty,
@@ -346,101 +342,125 @@ impl CodeGenerator {
 
     // ---- Individual instruction emitters ----
 
-    fn emit_const(&mut self, instr: &Instr, cv: &ConstValue) {
-        // TODO: mov immediate value into result's stack slot
+    fn emit_const(&mut self, _instr: &Instr, _cv: &ConstValue) {
+        // TODO: movl $imm, -offset(%rbp)  or  movq $imm, -offset(%rbp)
         todo!("emit_const");
     }
 
-    fn emit_binop(&mut self, instr: &Instr, op: BinOp, ty: &Type, lhs: ValueId, rhs: ValueId) {
-        // TODO: load lhs into eax/rax, perform op with rhs, store result
-        // NOTE: idiv is special -- needs cdq/cqo setup, result in rax (quot) or rdx (rem)
+    fn emit_binop(
+        &mut self,
+        _instr: &Instr,
+        _op: BinOp,
+        _ty: &Type,
+        _lhs: ValueId,
+        _rhs: ValueId,
+    ) {
+        // TODO: movl -off(%rbp), %eax; addl -off(%rbp), %eax; movl %eax, -off(%rbp)
+        // NOTE: idiv is special -- needs cltd/cqto setup, result in %eax (quot) or %edx (rem)
         todo!("emit_binop");
     }
 
-    fn emit_unop(&mut self, instr: &Instr, op: UnOp, ty: &Type, arg: ValueId) {
-        // TODO: load arg, apply neg/not, store result
+    fn emit_unop(&mut self, _instr: &Instr, _op: UnOp, _ty: &Type, _arg: ValueId) {
+        // TODO: movl -off(%rbp), %eax; negl %eax; movl %eax, -off(%rbp)
+        // For bool NOT: xorl $1, %eax
         todo!("emit_unop");
     }
 
-    fn emit_icmp(&mut self, instr: &Instr, pred: ICmpPred, ty: &Type, lhs: ValueId, rhs: ValueId) {
-        // TODO: cmp lhs, rhs; setcc al; movzx eax, al; store result
+    fn emit_icmp(
+        &mut self,
+        _instr: &Instr,
+        _pred: ICmpPred,
+        _ty: &Type,
+        _lhs: ValueId,
+        _rhs: ValueId,
+    ) {
+        // TODO: movl -off(%rbp), %eax; cmpl -off(%rbp), %eax; sete %al; movzbl %al, %eax; movl %eax, -off(%rbp)
         todo!("emit_icmp");
     }
 
-    fn emit_cast(&mut self, instr: &Instr, kind: CastKind, src: ValueId) {
-        // TODO: movsx (i32->i64) or truncate (i64->i32)
+    fn emit_cast(&mut self, _instr: &Instr, _kind: CastKind, _src: ValueId) {
+        // TODO: movslq -off(%rbp), %rax (i32->i64) or movl %eax, %eax (i64->i32 truncate)
         todo!("emit_cast");
     }
 
-    fn emit_global_addr(&mut self, instr: &Instr, sym: &Symbol, ty: &Type) {
-        // TODO: lea rax, [rip + sym]; store rax to result slot
+    fn emit_global_addr(&mut self, _instr: &Instr, _sym: &Symbol, _ty: &Type) {
+        // TODO: leaq sym(%rip), %rax; movq %rax, -off(%rbp)
         todo!("emit_global_addr");
     }
 
-    fn emit_global_array_addr(&mut self, instr: &Instr, sym: &Symbol, elem_ty: &Type) {
-        // TODO: lea rax, [rip + sym]; store rax to result slot
+    fn emit_global_array_addr(&mut self, _instr: &Instr, _sym: &Symbol, _elem_ty: &Type) {
+        // TODO: leaq sym(%rip), %rax; movq %rax, -off(%rbp)
         todo!("emit_global_array_addr");
     }
 
-    fn emit_global_str_addr(&mut self, instr: &Instr, sym: &Symbol) {
-        // TODO: lea rax, [rip + sym]; store rax to result slot
+    fn emit_global_str_addr(&mut self, _instr: &Instr, _sym: &Symbol) {
+        // TODO: leaq sym(%rip), %rax; movq %rax, -off(%rbp)
         todo!("emit_global_str_addr");
     }
 
-    fn emit_elem_addr(&mut self, instr: &Instr, elem_ty: &Type, base: ValueId, index: ValueId) {
-        // TODO: load base ptr, load index, lea rax [base + index*scale], store result
+    fn emit_elem_addr(
+        &mut self,
+        _instr: &Instr,
+        _elem_ty: &Type,
+        _base: ValueId,
+        _index: ValueId,
+    ) {
+        // TODO: movq -off(%rbp), %rax; movslq -off(%rbp), %rcx; leaq (%rax,%rcx,4), %rax; movq %rax, -off(%rbp)
         todo!("emit_elem_addr");
     }
 
-    fn emit_len(&mut self, instr: &Instr, sym: &Symbol) {
-        // TODO: emit compile-time constant array length as immediate mov
+    fn emit_len(&mut self, _instr: &Instr, _sym: &Symbol) {
+        // TODO: movl $<compile-time-length>, -off(%rbp)
         todo!("emit_len");
     }
 
-    fn emit_load(&mut self, instr: &Instr, ty: &Type, addr: ValueId) {
-        // TODO: load addr from stack, mov value from [addr], store to result slot
+    fn emit_load(&mut self, _instr: &Instr, _ty: &Type, _addr: ValueId) {
+        // TODO: movq -off(%rbp), %rax; movl (%rax), %ecx; movl %ecx, -off(%rbp)
         todo!("emit_load");
     }
 
-    fn emit_store(&mut self, instr: &Instr, ty: &Type, addr: ValueId, value: ValueId) {
-        // TODO: load addr and value, mov [addr], value
+    fn emit_store(&mut self, _instr: &Instr, _ty: &Type, _addr: ValueId, _value: ValueId) {
+        // TODO: movq -off(%rbp), %rax; movl -off(%rbp), %ecx; movl %ecx, (%rax)
         todo!("emit_store");
     }
 
     fn emit_call(
         &mut self,
-        instr: &Instr,
-        callee: &Symbol,
-        args: &[ValueId],
-        ret_ty: &Type,
-        is_import: bool,
+        _instr: &Instr,
+        _callee: &Symbol,
+        _args: &[ValueId],
+        _ret_ty: &Type,
+        _is_import: bool,
     ) {
         // TODO:
-        // 1. Move args into rdi, rsi, rdx, rcx, r8, r9 (or push for 7th+)
+        // 1. Move args into %rdi, %rsi, %rdx, %rcx, %r8, %r9 (or pushq for 7th+)
         // 2. Ensure 16-byte stack alignment before call
         // 3. call <callee>
-        // 4. Store rax to result slot (if non-void)
+        // 4. movl %eax, -off(%rbp)  (if non-void)
         todo!("emit_call");
     }
 
     // ==================== Terminator Emission ====================
 
-    fn emit_terminator(&mut self, func_name: &str, term: &Terminator, func: &FunctionIR) {
+    fn emit_terminator(&mut self, func_name: &str, term: &Terminator, _func: &FunctionIR) {
         match term {
             Terminator::Br { target, .. } => {
-                self.emit_instr(&format!("jmp {}", Self::block_label(func_name, *target)));
+                self.emit_instr(&format!(
+                    "jmp {}",
+                    Self::block_label(func_name, *target)
+                ));
             }
             Terminator::CBr {
-                cond,
-                then_bb,
-                else_bb,
+                cond: _,
+                then_bb: _,
+                else_bb: _,
                 ..
             } => {
-                // TODO: test cond, jne then_label, jmp else_label
+                // TODO: movl -off(%rbp), %eax; testl %eax, %eax; jne .L_then; jmp .L_else
                 todo!("emit CBr terminator");
             }
-            Terminator::Ret { value, .. } => {
-                // TODO: mov rax, value; epilogue; ret
+            Terminator::Ret { value: _, .. } => {
+                // TODO: movl -off(%rbp), %eax; epilogue; ret
                 todo!("emit Ret terminator");
             }
             Terminator::RetVoid { .. } => {
@@ -464,7 +484,8 @@ impl CodeGenerator {
         _func: &FunctionIR,
     ) {
         // TODO: for each phi in to_block, find the incoming for from_block,
-        // load the incoming value, store it to the phi result's location
+        // load the incoming value into a register, store it to the phi result's location
+        // e.g. movl -off(%rbp), %eax; movl %eax, -off(%rbp)
         todo!("emit_phi_copies");
     }
 }
