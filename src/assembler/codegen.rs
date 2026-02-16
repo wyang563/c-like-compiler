@@ -340,14 +340,11 @@ impl CodeGenerator {
             InstrKind::Cast { kind, src } => {
                 self.emit_cast(instr, *kind, *src);
             }
-            InstrKind::GlobalAddr { sym, ty } => {
-                self.emit_global_addr(instr, sym, ty);
-            }
-            InstrKind::GlobalArrayAddr { sym, elem_ty } => {
-                self.emit_global_array_addr(instr, sym, elem_ty);
-            }
-            InstrKind::GlobalStrAddr { sym } => {
-                self.emit_global_str_addr(instr, sym);
+            InstrKind::GlobalAddr { sym, .. }
+            | InstrKind::GlobalArrayAddr { sym, .. }
+            | InstrKind::GlobalStrAddr { sym } => {
+                // All three global address instructions work the same way
+                self.emit_global_symbol_addr(instr, sym);
             }
             InstrKind::ElemAddr {
                 elem_ty,
@@ -509,19 +506,16 @@ impl CodeGenerator {
         todo!("emit_cast");
     }
 
-    fn emit_global_addr(&mut self, _instr: &Instr, _sym: &Symbol, _ty: &Type) {
-        // TODO: leaq sym(%rip), %rax; movq %rax, -off(%rbp)
-        todo!("emit_global_addr");
-    }
+    /// Emit code to load the RIP-relative address of a global symbol.
+    /// Used for GlobalAddr, GlobalArrayAddr, and GlobalStrAddr instructions.
+    fn emit_global_symbol_addr(&mut self, instr: &Instr, sym: &Symbol) {
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
 
-    fn emit_global_array_addr(&mut self, _instr: &Instr, _sym: &Symbol, _elem_ty: &Type) {
-        // TODO: leaq sym(%rip), %rax; movq %rax, -off(%rbp)
-        todo!("emit_global_array_addr");
-    }
-
-    fn emit_global_str_addr(&mut self, _instr: &Instr, _sym: &Symbol) {
-        // TODO: leaq sym(%rip), %rax; movq %rax, -off(%rbp)
-        todo!("emit_global_str_addr");
+        // Load RIP-relative address of the global symbol into %rax
+        self.emit_instr(&format!("leaq {}(%rip), %rax", sym.0));
+        // Store pointer to result's stack slot
+        self.emit_instr(&format!("movq %rax, {}", dest));
     }
 
     fn emit_elem_addr(&mut self, _instr: &Instr, _elem_ty: &Type, _base: ValueId, _index: ValueId) {
@@ -534,14 +528,39 @@ impl CodeGenerator {
         todo!("emit_len");
     }
 
-    fn emit_load(&mut self, _instr: &Instr, _ty: &Type, _addr: ValueId) {
-        // TODO: movq -off(%rbp), %rax; movl (%rax), %ecx; movl %ecx, -off(%rbp)
-        todo!("emit_load");
+    fn emit_load(&mut self, instr: &Instr, ty: &Type, addr: ValueId) {
+        // Load a value from memory at the given address
+        // instr.results[0] is mem_out, instr.results[1] is the loaded value
+        let value_result = instr.results[1];
+        let dest = self.value_operand(value_result);
+        let addr_op = self.value_operand(addr);
+
+        let suffix = self.type_suffix(ty);
+        let val_reg = if suffix == "l" { "%ecx" } else { "%rcx" };
+
+        // Load pointer into %rax
+        self.emit_instr(&format!("movq {}, %rax", addr_op));
+        // Dereference pointer to load value into %ecx/%rcx
+        self.emit_instr(&format!("mov{} (%rax), {}", suffix, val_reg));
+        // Store loaded value to result's stack slot
+        self.emit_instr(&format!("mov{} {}, {}", suffix, val_reg, dest));
     }
 
-    fn emit_store(&mut self, _instr: &Instr, _ty: &Type, _addr: ValueId, _value: ValueId) {
-        // TODO: movq -off(%rbp), %rax; movl -off(%rbp), %ecx; movl %ecx, (%rax)
-        todo!("emit_store");
+    fn emit_store(&mut self, _instr: &Instr, ty: &Type, addr: ValueId, value: ValueId) {
+        // Store a value to memory at the given address
+        // Store doesn't produce a value result (only mem_out)
+        let addr_op = self.value_operand(addr);
+        let value_op = self.value_operand(value);
+
+        let suffix = self.type_suffix(ty);
+        let val_reg = if suffix == "l" { "%ecx" } else { "%rcx" };
+
+        // Load pointer into %rax
+        self.emit_instr(&format!("movq {}, %rax", addr_op));
+        // Load value to store into %ecx/%rcx
+        self.emit_instr(&format!("mov{} {}, {}", suffix, value_op, val_reg));
+        // Store value to memory at pointer location
+        self.emit_instr(&format!("mov{} {}, (%rax)", suffix, val_reg));
     }
 
     fn emit_call(
