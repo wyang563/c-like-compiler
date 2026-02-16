@@ -1285,6 +1285,13 @@ impl Visitor for SSA_CFG_Compiler {
         let var_type = self.get_result_var_type();
         let is_global = self.get_is_global();
 
+        // For IndexExpression assignments, save the elem_addr BEFORE evaluating RHS
+        // because visit_expression will overwrite result_value_id
+        let elem_addr_opt = match assignment.assign_var.as_ref() {
+            AST::ASTNode::IndexExpression(_) => Some(self.get_result_value_id()),
+            _ => None,
+        };
+
         // For ++/--, the RHS is implicit (constant 1). Otherwise, evaluate the RHS expression.
         let is_inc_dec = assign_op == "++" || assign_op == "--";
         let mut rhs_value = if is_inc_dec {
@@ -1358,8 +1365,9 @@ impl Visitor for SSA_CFG_Compiler {
 
             // Array element assignment
             AST::ASTNode::IndexExpression(_) => {
-                // visit_index_expression (status 2) put the elem addr in result_value_id
-                let elem_addr = self.get_result_value_id();
+                // Use the elem_addr we saved before evaluating the RHS
+                let elem_addr =
+                    elem_addr_opt.expect("elem_addr should be saved for IndexExpression");
 
                 // Handle compound assignments
                 if assign_op != "=" {

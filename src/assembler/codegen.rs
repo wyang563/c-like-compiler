@@ -53,8 +53,6 @@ impl CodeGenerator {
     pub fn generate(&mut self, program: &ProgramIR) -> String {
         self.emit_data_section(program);
         self.emit_text_section(program);
-        // Mark stack as non-executable (security feature, prevents warnings)
-        self.emit(".section .note.GNU-stack,\"\",@progbits");
         self.output.join("\n")
     }
 
@@ -503,9 +501,25 @@ impl CodeGenerator {
         self.emit_instr(&format!("movl %eax, {}", dest));
     }
 
-    fn emit_cast(&mut self, _instr: &Instr, _kind: CastKind, _src: ValueId) {
-        // TODO: movslq -off(%rbp), %rax (i32->i64) or movl %eax, %eax (i64->i32 truncate)
-        todo!("emit_cast");
+    fn emit_cast(&mut self, instr: &Instr, kind: CastKind, src: ValueId) {
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+        let src_op = self.value_operand(src);
+
+        match kind {
+            CastKind::I32ToI64 => {
+                // Sign-extend 32-bit to 64-bit
+                // movslq loads a 32-bit value and sign-extends it to 64-bit in %rax
+                self.emit_instr(&format!("movslq {}, %rax", src_op));
+                self.emit_instr(&format!("movq %rax, {}", dest));
+            }
+            CastKind::I64ToI32 => {
+                // Truncate 64-bit to 32-bit
+                // Load the 64-bit value, then store only the lower 32 bits
+                self.emit_instr(&format!("movq {}, %rax", src_op));
+                self.emit_instr(&format!("movl %eax, {}", dest));
+            }
+        }
     }
 
     /// Emit code to load the RIP-relative address of a global symbol.
@@ -546,7 +560,9 @@ impl CodeGenerator {
         let dest = self.value_operand(result);
 
         // Look up the array length from the global declarations
-        let len = self.array_lengths.get(&sym.0)
+        let len = self
+            .array_lengths
+            .get(&sym.0)
             .unwrap_or_else(|| panic!("Array {} not found in array_lengths map", sym.0));
 
         // Store the constant length value
