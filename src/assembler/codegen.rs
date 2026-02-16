@@ -53,6 +53,8 @@ impl CodeGenerator {
     pub fn generate(&mut self, program: &ProgramIR) -> String {
         self.emit_data_section(program);
         self.emit_text_section(program);
+        // Mark stack as non-executable (security feature, prevents warnings)
+        self.emit(".section .note.GNU-stack,\"\",@progbits");
         self.output.join("\n")
     }
 
@@ -85,7 +87,7 @@ impl CodeGenerator {
 
     /// Generate a unique internal label
     fn fresh_label(&mut self, prefix: &str) -> String {
-        let label = format!(".L{}_{}", prefix, self.label_counter);
+        let label = format!(".{}_{}", prefix, self.label_counter);
         self.label_counter += 1;
         label
     }
@@ -518,14 +520,37 @@ impl CodeGenerator {
         self.emit_instr(&format!("movq %rax, {}", dest));
     }
 
-    fn emit_elem_addr(&mut self, _instr: &Instr, _elem_ty: &Type, _base: ValueId, _index: ValueId) {
-        // TODO: movq -off(%rbp), %rax; movslq -off(%rbp), %rcx; leaq (%rax,%rcx,4), %rax; movq %rax, -off(%rbp)
-        todo!("emit_elem_addr");
+    fn emit_elem_addr(&mut self, instr: &Instr, elem_ty: &Type, base: ValueId, index: ValueId) {
+        // Compute address of base[index] where base is ptr<elem_ty> and index is i32
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+        let base_op = self.value_operand(base);
+        let index_op = self.value_operand(index);
+
+        // Determine the scale factor based on element size
+        let elem_size = self.type_size(elem_ty);
+
+        // Load base pointer into %rax
+        self.emit_instr(&format!("movq {}, %rax", base_op));
+        // Load index (i32) and sign-extend to 64-bit in %rcx
+        self.emit_instr(&format!("movslq {}, %rcx", index_op));
+        // Compute address: base + index * elem_size using scaled indexing
+        self.emit_instr(&format!("leaq (%rax,%rcx,{}), %rax", elem_size));
+        // Store resulting pointer
+        self.emit_instr(&format!("movq %rax, {}", dest));
     }
 
-    fn emit_len(&mut self, _instr: &Instr, _sym: &Symbol) {
-        // TODO: movl $<compile-time-length>, -off(%rbp)
-        todo!("emit_len");
+    fn emit_len(&mut self, instr: &Instr, sym: &Symbol) {
+        // Return the compile-time length of an array as i32
+        let result = instr.results[0];
+        let dest = self.value_operand(result);
+
+        // Look up the array length from the global declarations
+        let len = self.array_lengths.get(&sym.0)
+            .unwrap_or_else(|| panic!("Array {} not found in array_lengths map", sym.0));
+
+        // Store the constant length value
+        self.emit_instr(&format!("movl ${}, {}", len, dest));
     }
 
     fn emit_load(&mut self, instr: &Instr, ty: &Type, addr: ValueId) {
