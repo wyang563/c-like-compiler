@@ -5,42 +5,10 @@ use super::three_address_code::{
     BasicBlock, BinOp, BlockId, CastKind, ConstValue, FunctionIR, GlobalDecl, GlobalKind, ICmpPred,
     Instr, InstrId, InstrKind, Phi, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId, ValueInfo,
 };
+use super::utils::{
+    compound_assign_to_binop, is_generic_value_name, lookup_snapshot_var, process_string_literal,
+};
 use std::collections::{HashMap, HashSet};
-
-/// Process a string literal value from the parser (which includes surrounding quotes
-/// and raw escape sequences like \n, \t, \\) into actual bytes.
-fn process_string_literal(raw: &str) -> Vec<i8> {
-    // Strip surrounding quotes
-    let inner = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
-        &raw[1..raw.len() - 1]
-    } else {
-        raw
-    };
-
-    let mut bytes = Vec::new();
-    let mut chars = inner.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('n') => bytes.push(b'\n' as i8),
-                Some('t') => bytes.push(b'\t' as i8),
-                Some('\\') => bytes.push(b'\\' as i8),
-                Some('"') => bytes.push(b'"' as i8),
-                Some('\'') => bytes.push(b'\'' as i8),
-                Some('0') => bytes.push(0),
-                Some(other) => {
-                    // Unknown escape — emit backslash and the character
-                    bytes.push(b'\\' as i8);
-                    bytes.push(other as i8);
-                }
-                None => bytes.push(b'\\' as i8),
-            }
-        } else {
-            bytes.push(ch as i8);
-        }
-    }
-    bytes
-}
 
 /// Context information for a loop (while/for)
 /// Used by break/continue to determine jump targets
@@ -435,39 +403,6 @@ impl SSA_CFG_Compiler {
         return cur_terminator == Terminator::Unreachable;
     }
 
-    /// Check if a value name is a generic instruction name (not a user variable).
-    /// Used to decide whether to propagate a variable name onto a value.
-    fn is_generic_value_name(name: &str) -> bool {
-        name.is_empty()
-            || matches!(
-                name,
-                "call"
-                    | "binop"
-                    | "cmp"
-                    | "neg"
-                    | "not"
-                    | "cast"
-                    | "len"
-                    | "logic"
-                    | "short_circuit"
-            )
-    }
-
-    /// Map a compound assignment operator string to the corresponding BinOp
-    fn compound_assign_to_binop(op: &str) -> BinOp {
-        match op {
-            "+=" | "++" => BinOp::Add,
-            "-=" | "--" => BinOp::Sub,
-            "*=" => BinOp::Mul,
-            "/=" => BinOp::SDiv,
-            "%=" => BinOp::SRem,
-            _ => {
-                eprintln!("Error: unsupported compound assignment operator: {}", op);
-                panic!();
-            }
-        }
-    }
-
     // ==================== Break/Continue & Phi Helpers ====================
 
     /// Snapshot all current variable mappings into a flat vec.
@@ -480,20 +415,6 @@ impl SSA_CFG_Compiler {
                     .map(move |(name, &val)| (scope_ind, name.clone(), val))
             })
             .collect()
-    }
-
-    /// Look up a variable's value in a snapshot by (scope_ind, var_name).
-    fn lookup_snapshot_var(
-        &self,
-        snapshot: &[(usize, String, ValueId)],
-        scope_ind: usize,
-        var_name: &str,
-    ) -> ValueId {
-        snapshot
-            .iter()
-            .find(|(s, n, _)| *s == scope_ind && n == var_name)
-            .map(|(_, _, v)| *v)
-            .unwrap()
     }
 
     /// Patch existing phis in `target_block` with additional incomings from edges.
@@ -522,7 +443,7 @@ impl SSA_CFG_Compiler {
                 .push((*from_block, *edge_mem));
 
             for (scope_ind, var_name, phi_result) in var_phis {
-                let val = self.lookup_snapshot_var(var_snapshot, *scope_ind, var_name);
+                let val = lookup_snapshot_var(var_snapshot, *scope_ind, var_name);
                 self.cur_func.as_mut().unwrap().blocks[block_ind]
                     .phis
                     .iter_mut()
@@ -569,7 +490,7 @@ impl SSA_CFG_Compiler {
         for (scope_ind, var_name, _) in var_phis {
             let var_incomings: Vec<(BlockId, ValueId)> = incomings
                 .iter()
-                .map(|(b, _, snap)| (*b, self.lookup_snapshot_var(snap, *scope_ind, var_name)))
+                .map(|(b, _, snap)| (*b, lookup_snapshot_var(snap, *scope_ind, var_name)))
                 .collect();
             let var_ty = self.cur_func.as_ref().unwrap().values[&var_incomings[0].1]
                 .ty
@@ -756,11 +677,10 @@ impl Visitor for SSA_CFG_Compiler {
             }
         }
 
-        // global variable declaration case
         if is_global {
+            // Global variable declaration — emit into the data section
             match &var_type {
                 Type::I32 | Type::I64 | Type::I1 => {
-                    // get initializeed value if it exists
                     let global_decl = GlobalDecl {
                         sym: Symbol(var_name.clone()),
                         kind: GlobalKind::GlobalScalar {
@@ -786,10 +706,8 @@ impl Visitor for SSA_CFG_Compiler {
                     panic!();
                 }
             }
-        }
-        // For local array declarations, emit an Alloca instruction to allocate stack space
-        // and set the pointer value.
-        if !is_global && var_decl.is_array {
+        } else if var_decl.is_array {
+            // Local array declaration — emit an Alloca to allocate stack space
             if let Type::Ptr(elem_ty) = &var_type {
                 let array_len = init_array_len.unwrap() as u32;
                 let var_scope_ind = self.get_var_scope_ind(&var_name);
@@ -814,12 +732,17 @@ impl Visitor for SSA_CFG_Compiler {
     }
 
     fn visit_if_statement(&mut self, if_statement: &AST::IfStatement) {
-        let entry_block_id = self.current_block_id();
         let has_else = if_statement.else_block.as_ref().is_some();
 
         // Evaluate the condition expression in the current block
+        // NOTE: if condition contains &&/||, short-circuit evaluation creates
+        // new blocks, so the current block after this may differ from before.
         self.visit_expression(&if_statement.condition);
         let cond_value = self.get_result_value_id();
+
+        // Capture the block we're in AFTER condition evaluation (may be a
+        // short-circuit merge block, not the original entry block).
+        let cond_block_id = self.current_block_id();
 
         // Snapshot entry state for phi construction at merge
         let entry_mem = self.cur_mem;
@@ -834,7 +757,7 @@ impl Visitor for SSA_CFG_Compiler {
             merge_bb_id // If no else clause, false branch goes directly to merge
         };
 
-        // Set the conditional branch terminator on the current (entry) block
+        // Set the conditional branch terminator on the current block
         let mem = self.new_value(Type::Mem, "");
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
             mem,
@@ -843,12 +766,12 @@ impl Visitor for SSA_CFG_Compiler {
             else_bb: else_bb_id,
         };
 
-        // Record predecessor edges
-        self.add_predecessor(then_bb_id, entry_block_id);
+        // Record predecessor edges (use cond_block_id, not entry_block_id)
+        self.add_predecessor(then_bb_id, cond_block_id);
         if has_else {
-            self.add_predecessor(else_bb_id, entry_block_id);
+            self.add_predecessor(else_bb_id, cond_block_id);
         } else {
-            self.add_predecessor(merge_bb_id, entry_block_id);
+            self.add_predecessor(merge_bb_id, cond_block_id);
         }
 
         // ── Then block ──
@@ -902,9 +825,9 @@ impl Visitor for SSA_CFG_Compiler {
                 self.add_predecessor(merge_bb_id, else_end_block_id);
             }
         } else {
-            // No else: false branch flows directly from entry to merge
+            // No else: false branch flows directly from cond block to merge
             else_fell_through = true;
-            else_end_block_id = entry_block_id;
+            else_end_block_id = cond_block_id;
             else_end_mem = entry_mem;
             else_end_vars = entry_vars.clone();
         }
@@ -1020,6 +943,12 @@ impl Visitor for SSA_CFG_Compiler {
         self.visit_expression(&for_statement.end_expr);
         let cond_value = self.get_result_value_id();
 
+        // After condition eval, current block may differ from header_bb_id
+        // if the condition contained &&/|| short-circuit evaluation.
+        let cond_block_id = self.current_block_id();
+        let cond_mem = self.cur_mem;
+        let cond_vars = self.snapshot_vars();
+
         // Conditional branch: true -> body, false -> exit
         let mem = self.new_value(Type::Mem, "");
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
@@ -1028,8 +957,8 @@ impl Visitor for SSA_CFG_Compiler {
             then_bb: body_bb_id,
             else_bb: exit_bb_id,
         };
-        self.add_predecessor(body_bb_id, header_bb_id);
-        self.add_predecessor(exit_bb_id, header_bb_id);
+        self.add_predecessor(body_bb_id, cond_block_id);
+        self.add_predecessor(exit_bb_id, cond_block_id);
 
         // Body block
         self.start_block_with_id(body_bb_id);
@@ -1116,15 +1045,12 @@ impl Visitor for SSA_CFG_Compiler {
         self.start_block_with_id(exit_bb_id);
 
         if !break_edges.is_empty() {
-            let header_snapshot = var_phis
-                .iter()
-                .map(|(s, n, p)| (*s, n.clone(), *p))
-                .collect();
-            let mut exit_incomings = vec![(header_bb_id, mem_phi_result, header_snapshot)];
+            // Use cond_block_id/cond_mem/cond_vars for the normal exit path
+            let mut exit_incomings = vec![(cond_block_id, cond_mem, cond_vars)];
             exit_incomings.extend(break_edges);
             self.emit_merge_phis(&var_phis, &exit_incomings);
         } else {
-            self.cur_mem = mem_phi_result;
+            self.cur_mem = cond_mem;
         }
     }
 
@@ -1205,6 +1131,12 @@ impl Visitor for SSA_CFG_Compiler {
         self.visit_expression(&while_statement.condition);
         let cond_value = self.get_result_value_id();
 
+        // After condition eval, current block may differ from header_bb_id
+        // if the condition contained &&/|| short-circuit evaluation.
+        let cond_block_id = self.current_block_id();
+        let cond_mem = self.cur_mem;
+        let cond_vars = self.snapshot_vars();
+
         // Conditional branch: true -> body, false -> exit
         let mem = self.new_value(Type::Mem, "");
         self.cur_func.as_mut().unwrap().blocks[self.cur_block_ind].term = Terminator::CBr {
@@ -1213,8 +1145,8 @@ impl Visitor for SSA_CFG_Compiler {
             then_bb: body_bb_id,
             else_bb: exit_bb_id,
         };
-        self.add_predecessor(body_bb_id, header_bb_id);
-        self.add_predecessor(exit_bb_id, header_bb_id);
+        self.add_predecessor(body_bb_id, cond_block_id);
+        self.add_predecessor(exit_bb_id, cond_block_id);
 
         // Body block
         self.start_block_with_id(body_bb_id);
@@ -1264,15 +1196,14 @@ impl Visitor for SSA_CFG_Compiler {
         self.start_block_with_id(exit_bb_id);
 
         if !break_edges.is_empty() {
-            let header_snapshot = var_phis
-                .iter()
-                .map(|(s, n, p)| (*s, n.clone(), *p))
-                .collect();
-            let mut exit_incomings = vec![(header_bb_id, mem_phi_result, header_snapshot)];
+            // Use cond_block_id/cond_mem/cond_vars for the normal exit path
+            // (condition was false), since condition eval may have created
+            // short-circuit blocks between header and the exit branch.
+            let mut exit_incomings = vec![(cond_block_id, cond_mem, cond_vars)];
             exit_incomings.extend(break_edges);
             self.emit_merge_phis(&var_phis, &exit_incomings);
         } else {
-            self.cur_mem = mem_phi_result;
+            self.cur_mem = cond_mem;
         }
     }
 
@@ -1380,7 +1311,7 @@ impl Visitor for SSA_CFG_Compiler {
                 if assign_op != "=" {
                     let current_value =
                         self.read_scalar_var(var_name, var_scope_ind, is_global, &var_type);
-                    let bin_op = Self::compound_assign_to_binop(assign_op);
+                    let bin_op = compound_assign_to_binop(assign_op);
                     let result = self.new_value(var_type.clone(), var_name);
                     self.emit_instr(
                         vec![result],
@@ -1404,7 +1335,7 @@ impl Visitor for SSA_CFG_Compiler {
                         if let Some(info) =
                             self.cur_func.as_mut().unwrap().values.get_mut(&rhs_value)
                         {
-                            if Self::is_generic_value_name(&info.org_name) {
+                            if is_generic_value_name(&info.org_name) {
                                 info.org_name = var_name.to_string();
                             }
                         }
@@ -1438,7 +1369,7 @@ impl Visitor for SSA_CFG_Compiler {
                     );
                     self.cur_mem = mem_out;
 
-                    let bin_op = Self::compound_assign_to_binop(assign_op);
+                    let bin_op = compound_assign_to_binop(assign_op);
                     let result = self.new_value(var_type.clone(), "");
                     self.emit_instr(
                         vec![result],

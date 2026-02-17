@@ -229,6 +229,9 @@ impl CodeGenerator {
                     // Record the offset of the start of this array (lowest address)
                     self.alloca_offsets
                         .insert(instr.results[0], self.next_stack_offset);
+                    // Track the array length so Len instructions can look it up
+                    let array_name = &func.values[&instr.results[0]].org_name;
+                    self.array_lengths.insert(array_name.clone(), *count);
                 }
             }
         }
@@ -418,15 +421,25 @@ impl CodeGenerator {
         let result = instr.results[0];
         let dest = self.value_operand(result);
 
-        // Determine instruction suffix based on constant type
-        let (suffix, imm) = match cv {
-            ConstValue::I1(b) => ("l", *b as i64),
-            ConstValue::I32(n) => ("l", *n as i64),
-            ConstValue::I64(n) => ("q", *n),
-        };
-
-        // Emit: movl/movq $imm, -offset(%rbp)
-        self.emit_instr(&format!("mov{} ${}, {}", suffix, imm, dest));
+        match cv {
+            ConstValue::I1(b) => {
+                self.emit_instr(&format!("movl ${}, {}", *b as i64, dest));
+            }
+            ConstValue::I32(n) => {
+                self.emit_instr(&format!("movl ${}, {}", *n as i64, dest));
+            }
+            ConstValue::I64(n) => {
+                let imm = *n;
+                // movq $imm, mem only accepts 32-bit sign-extended immediates.
+                // For values outside that range, use movabsq into a register first.
+                if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                    self.emit_instr(&format!("movq ${}, {}", imm, dest));
+                } else {
+                    self.emit_instr(&format!("movabsq ${}, %rax", imm));
+                    self.emit_instr(&format!("movq %rax, {}", dest));
+                }
+            }
+        }
     }
 
     fn emit_binop(&mut self, instr: &Instr, op: BinOp, ty: &Type, lhs: ValueId, rhs: ValueId) {
@@ -809,27 +822,44 @@ impl CodeGenerator {
 
     /// Emit copies for phi resolution at the end of a predecessor block.
     /// Called before the terminator jump to patch phi incomings in the successor.
+    ///
+    /// Phi semantics require parallel copies (all reads happen before any write).
+    /// We use a two-phase approach: push all source values onto the stack,
+    /// then pop them in reverse order into their destinations.
     fn emit_phi_copies(&mut self, from_block: BlockId, to_block: &BasicBlock) {
+        // Collect all (source, dest, type) copies needed
+        let mut copies: Vec<(String, String, String)> = vec![];
         for phi in &to_block.phis {
-            // Skip mem-typed phis (shouldn't appear in phis vec, but be safe)
             if matches!(phi.ty, Type::Mem | Type::Void | Type::None) {
                 continue;
             }
-
-            // Find the incoming value for our predecessor block
             for (block_id, value_id) in &phi.incomings {
                 if *block_id == from_block {
                     let suffix = self.type_suffix(&phi.ty);
-                    let reg = if suffix == "l" { "%eax" } else { "%rax" };
                     let src = self.value_operand(*value_id);
                     let dest = self.value_operand(phi.result);
-
-                    // Copy: load incoming value into register, store to phi result slot
-                    self.emit_instr(&format!("mov{} {}, {}", suffix, src, reg));
-                    self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
+                    copies.push((src, dest, suffix.to_string()));
                     break;
                 }
             }
+        }
+
+        if copies.is_empty() {
+            return;
+        }
+
+        // Phase 1: Push all source values onto the stack (reads before writes)
+        for (src, _, suffix) in &copies {
+            let reg = if suffix == "l" { "%eax" } else { "%rax" };
+            self.emit_instr(&format!("mov{} {}, {}", suffix, src, reg));
+            self.emit_instr("pushq %rax");
+        }
+
+        // Phase 2: Pop in reverse order and store to destinations
+        for (_, dest, suffix) in copies.iter().rev() {
+            let reg = if suffix == "l" { "%eax" } else { "%rax" };
+            self.emit_instr("popq %rax");
+            self.emit_instr(&format!("mov{} {}, {}", suffix, reg, dest));
         }
     }
 }
