@@ -89,6 +89,8 @@ pub struct ValueInfo {
 pub struct BasicBlock {
     // id of this block inside function
     pub id: BlockId,
+    /// Semantic label for this block (e.g. "if_then", "while_header", "entry")
+    pub label: String,
     // join blocks to determine mem_in value
     pub mem_in: Option<Phi>,
     // value phis only (non-mem variables)

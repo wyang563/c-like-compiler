@@ -35,6 +35,8 @@ pub struct CodeGenerator {
     frame_size: i32,
     /// Map from Alloca result ValueId to the stack offset of the allocated array region
     alloca_offsets: HashMap<ValueId, i32>,
+    /// Map from BlockId to its semantic label (e.g. "if_then", "while_header")
+    block_labels: HashMap<BlockId, String>,
 }
 
 impl CodeGenerator {
@@ -47,6 +49,7 @@ impl CodeGenerator {
             next_stack_offset: 0,
             frame_size: 0,
             alloca_offsets: HashMap::new(),
+            block_labels: HashMap::new(),
         }
     }
 
@@ -181,8 +184,14 @@ impl CodeGenerator {
         // Reset per-function state
         self.value_locations.clear();
         self.alloca_offsets.clear();
+        self.block_labels.clear();
         self.next_stack_offset = 0;
         self.frame_size = 0;
+
+        // Build block label map from IR
+        for block in &func.blocks {
+            self.block_labels.insert(block.id, block.label.clone());
+        }
 
         // Phase 1: Allocate stack slots for all ValueIds
         self.allocate_values(func);
@@ -340,8 +349,13 @@ impl CodeGenerator {
         self.emit_terminator(func_name, block.id, &block.term, func);
     }
 
-    /// Generate a label string for a block
+    /// Generate a label string for a block, including its semantic label
     fn block_label(&self, func_name: &str, block_id: BlockId) -> String {
+        if let Some(label) = self.block_labels.get(&block_id) {
+            if !label.is_empty() {
+                return format!(".{}_bb{}_{}", func_name, block_id.0, label);
+            }
+        }
         format!(".{}_bb{}", func_name, block_id.0)
     }
 

@@ -234,9 +234,10 @@ impl SSA_CFG_Compiler {
 
     /// Create a new basic block with a specific pre-allocated block ID
     /// and set it as the current block
-    fn start_block_with_id(&mut self, block_id: BlockId) -> usize {
+    fn start_block_with_id(&mut self, block_id: BlockId, label: &str) -> usize {
         let new_bb = BasicBlock {
             id: block_id,
+            label: label.to_string(),
             mem_in: None,
             phis: vec![],
             instrs: vec![],
@@ -590,7 +591,7 @@ impl Visitor for SSA_CFG_Compiler {
 
         // Create entry block for function
         let entry_block_id = BlockId(self.get_next_block_id());
-        self.start_block_with_id(entry_block_id);
+        self.start_block_with_id(entry_block_id, "entry");
 
         // visit function block
         self.visit_block(method_decl.body.as_ref());
@@ -775,7 +776,7 @@ impl Visitor for SSA_CFG_Compiler {
         }
 
         // ── Then block ──
-        self.start_block_with_id(then_bb_id);
+        self.start_block_with_id(then_bb_id, "if_then");
         self.visit_block(if_statement.then_block.as_ref());
 
         let then_fell_through = self.is_terminator_unreachable();
@@ -808,7 +809,7 @@ impl Visitor for SSA_CFG_Compiler {
         let else_end_vars: Vec<(usize, String, ValueId)>;
 
         if let Some(else_block) = if_statement.else_block.as_ref().as_ref() {
-            self.start_block_with_id(else_bb_id);
+            self.start_block_with_id(else_bb_id, "if_else");
             self.visit_block(else_block);
 
             else_fell_through = self.is_terminator_unreachable();
@@ -833,7 +834,7 @@ impl Visitor for SSA_CFG_Compiler {
         }
 
         // ── Merge block with phi insertion ──
-        self.start_block_with_id(merge_bb_id);
+        self.start_block_with_id(merge_bb_id, "if_merge");
 
         let mut merge_incomings: Vec<(BlockId, ValueId, Vec<(usize, String, ValueId)>)> = vec![];
         if then_fell_through {
@@ -885,7 +886,7 @@ impl Visitor for SSA_CFG_Compiler {
         self.add_predecessor(header_bb_id, entry_block_id);
 
         // Header block: evaluate condition
-        self.start_block_with_id(header_bb_id);
+        self.start_block_with_id(header_bb_id, "for_header");
 
         // Memory phi for the header (entry + back-edge from update)
         let mem_phi_result = self.new_value(Type::Mem, "");
@@ -961,7 +962,7 @@ impl Visitor for SSA_CFG_Compiler {
         self.add_predecessor(exit_bb_id, cond_block_id);
 
         // Body block
-        self.start_block_with_id(body_bb_id);
+        self.start_block_with_id(body_bb_id, "for_body");
 
         // Push loop context: continue jumps to update block, not header
         self.loop_stack.push(LoopContext {
@@ -996,7 +997,7 @@ impl Visitor for SSA_CFG_Compiler {
         }
 
         // Update block: merge body-end + continue edges, then execute update expr
-        self.start_block_with_id(update_bb_id);
+        self.start_block_with_id(update_bb_id, "for_update");
 
         if has_continues {
             let mut update_incomings = vec![];
@@ -1042,7 +1043,7 @@ impl Visitor for SSA_CFG_Compiler {
                 .unwrap()
                 .insert(var_name.clone(), *phi_result);
         }
-        self.start_block_with_id(exit_bb_id);
+        self.start_block_with_id(exit_bb_id, "for_exit");
 
         if !break_edges.is_empty() {
             // Use cond_block_id/cond_mem/cond_vars for the normal exit path
@@ -1070,7 +1071,7 @@ impl Visitor for SSA_CFG_Compiler {
         self.add_predecessor(header_bb_id, entry_block_id);
 
         // Header block: evaluate condition
-        self.start_block_with_id(header_bb_id);
+        self.start_block_with_id(header_bb_id, "while_header");
 
         // Memory phi for the header (entry + back-edge from body)
         let mem_phi_result = self.new_value(Type::Mem, "");
@@ -1149,7 +1150,7 @@ impl Visitor for SSA_CFG_Compiler {
         self.add_predecessor(exit_bb_id, cond_block_id);
 
         // Body block
-        self.start_block_with_id(body_bb_id);
+        self.start_block_with_id(body_bb_id, "while_body");
 
         // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
@@ -1193,7 +1194,7 @@ impl Visitor for SSA_CFG_Compiler {
                 .unwrap()
                 .insert(var_name.clone(), *phi_result);
         }
-        self.start_block_with_id(exit_bb_id);
+        self.start_block_with_id(exit_bb_id, "while_exit");
 
         if !break_edges.is_empty() {
             // Use cond_block_id/cond_mem/cond_vars for the normal exit path
@@ -1768,7 +1769,7 @@ impl Visitor for SSA_CFG_Compiler {
                 ctx.mem_phi_incomings.push((lhs_block_id, sc_mem));
 
                 // Evaluate RHS
-                self.start_block_with_id(rhs_bb_id);
+                self.start_block_with_id(rhs_bb_id, "sc_rhs");
                 self.visit_expression(&binary_expression.right_expr);
                 let rhs_val = self.get_result_value_id();
 
@@ -1792,7 +1793,7 @@ impl Visitor for SSA_CFG_Compiler {
                     mem_phi_incomings.push((rhs_block_id, rhs_mem));
 
                     self.short_circuit_ctx = prev_ctx; // Restore
-                    self.start_block_with_id(merge_bb);
+                    self.start_block_with_id(merge_bb, "sc_merge");
 
                     // Boolean result phi
                     let phi_result = self.new_value(Type::I1, "logic");

@@ -111,7 +111,11 @@ fn render_block(output: &mut String, block: &BasicBlock, values: &HashMap<ValueI
     let term_line = format_terminator(&block.term, values);
 
     // box width
-    let block_label = format!("B{}", block.id.0);
+    let block_label = if block.label.is_empty() {
+        format!("B{}", block.id.0)
+    } else {
+        format!("B{} ({})", block.id.0, block.label)
+    };
     let content_max = body_lines
         .iter()
         .map(|l| l.len())
