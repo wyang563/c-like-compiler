@@ -3,22 +3,40 @@ use super::super::cfg::cfg_visualizer::visualize_program_ir;
 use super::super::cfg::ssa_cfg_compiler::compile_to_ssa_cfg;
 use super::super::parser::parser::parse_file;
 use super::super::semantics::semantics::interpret_file;
+use super::super::utils::cli::{CodegenBackend, Optimization};
+use std::collections::HashSet;
 
-pub fn assemble(input: &std::path::PathBuf, mut writer: Box<dyn std::io::Write>, debug: bool) {
+pub fn assemble(
+    input: &std::path::PathBuf,
+    mut writer: Box<dyn std::io::Write>,
+    debug: bool,
+    _opts: &HashSet<Optimization>,
+    backend: &CodegenBackend,
+) {
     match parse_file(input) {
         Ok(ast) => {
             match interpret_file(input, debug) {
                 Ok(symbol_table) => {
-                    // create SSA form CFG
+                    // Create SSA form CFG
                     let ssa_cfg = compile_to_ssa_cfg(ast, symbol_table);
-                    visualize_program_ir(&ssa_cfg);
-                    generate_html_cfg(&ssa_cfg, "cfg_output.html");
+                    if debug {
+                        visualize_program_ir(&ssa_cfg);
+                        generate_html_cfg(&ssa_cfg, "cfg_output.html");
+                    }
 
-                    // TODO: run optimizations on CFG
+                    // TODO: run enabled optimizations on CFG
 
-                    // code gen
-                    let mut codegen = super::codegen::CodeGenerator::new();
-                    let asm_output = codegen.generate(&ssa_cfg);
+                    // Code generation
+                    let asm_output = match backend {
+                        CodegenBackend::Reg => {
+                            let mut codegen = super::codegen::CodeGenerator::new();
+                            codegen.generate(&ssa_cfg)
+                        }
+                        CodegenBackend::NoReg => {
+                            let mut codegen = super::codegen_no_reg::CodeGeneratorNoReg::new();
+                            codegen.generate(&ssa_cfg)
+                        }
+                    };
                     write!(writer, "{}", asm_output).unwrap();
                 }
                 Err(e) => {

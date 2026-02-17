@@ -16,10 +16,12 @@ fn main() {
     let args = utils::cli::parse();
     let _input = std::fs::read_to_string(&args.input).expect("Filename is incorrect.");
 
+    let active_opts = utils::cli::parse_optimizations(&args.opt);
+
     if args.debug {
         eprintln!(
-            "Filename: {:?}\nDebug: {:?}\nOptimizations: {:?}\nOutput File: {:?}\nTarget: {:?}",
-            args.input, args.debug, args.opt, args.output, args.target
+            "Filename: {:?}\nDebug: {:?}\nOptimizations: {:?}\nBackend: {:?}\nOutput File: {:?}\nTarget: {:?}",
+            args.input, args.debug, active_opts, args.backend, args.output, args.target
         );
     }
 
@@ -39,7 +41,13 @@ fn main() {
             semantics::semantics::interpret(&args.input, writer, args.debug);
         }
         utils::cli::CompilerAction::Assembly => {
-            assembler::assembler::assemble(&args.input, writer, args.debug);
+            assembler::assembler::assemble(
+                &args.input,
+                writer,
+                args.debug,
+                &active_opts,
+                &args.backend,
+            );
         }
     }
 }
