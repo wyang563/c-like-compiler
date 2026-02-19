@@ -30,6 +30,8 @@ pub fn assemble(
                     let asm_output = match backend {
                         CodegenBackend::Reg => {
                             let mut codegen = super::codegen::CodeGenerator::new();
+                            // remove phi nodes
+                            // reg allocation + codegen
                             codegen.generate(&ssa_cfg)
                         }
                         CodegenBackend::NoReg => {

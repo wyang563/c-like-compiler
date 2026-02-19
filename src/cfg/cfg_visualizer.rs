@@ -379,6 +379,13 @@ fn format_instr_kind(kind: &InstrKind, values: &HashMap<ValueId, ValueInfo>) -> 
         InstrKind::Alloca { elem_ty, count } => {
             format!("alloca {} x {}", format_type(elem_ty), count)
         }
+        InstrKind::Assign { ty, src } => {
+            format!(
+                "assign_{} {}",
+                format_type(ty),
+                format_value_named(src, values)
+            )
+        }
     }
 }
 
