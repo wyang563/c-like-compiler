@@ -554,10 +554,15 @@ impl SSA_CFG_Compiler {
         };
 
         // Build the Assign instructions to append to each predecessor block.
+        // Also track the first new InstrId assigned to each phi result so we
+        // can update declared_by after phi nodes are cleared.
         let mut inserts: HashMap<usize, Vec<Instr>> = HashMap::new();
+        let mut phi_result_new_decl: HashMap<ValueId, InstrId> = HashMap::new();
         for (pred_id, src, dst, ty) in all_copies {
             let pred_idx = self.cur_func.as_ref().unwrap().block_id_to_ind[&pred_id];
             let instr_id = InstrId(self.get_next_instr_id());
+            // Record the first Assign that defines this phi result.
+            phi_result_new_decl.entry(dst).or_insert(instr_id);
             inserts.entry(pred_idx).or_default().push(Instr {
                 id: instr_id,
                 results: vec![dst],
@@ -571,10 +576,106 @@ impl SSA_CFG_Compiler {
             func.blocks[pred_idx].instrs.extend(new_instrs);
         }
 
+        // Update declared_by so phi results now point to the Assign that
+        // defines them, rather than the old (now-deleted) phi InstrId.
+        for (dst, new_instr_id) in phi_result_new_decl {
+            if let Some(info) = func.values.get_mut(&dst) {
+                info.declared_by = Some(new_instr_id);
+            }
+        }
+
         // Remove all phi nodes (both value phis and mem_in) from every block.
         for block in &mut func.blocks {
             block.phis.clear();
             block.mem_in = None;
+        }
+    }
+
+    // ==================== Def-Use Chain Utilities ====================
+
+    /// Returns all `ValueId`s used as inputs by the given `InstrKind`.
+    /// Includes every operand regardless of type (Mem tokens, pointers, scalars).
+    pub fn instr_uses(kind: &InstrKind) -> Vec<ValueId> {
+        match kind {
+            InstrKind::Const(_) => vec![],
+            InstrKind::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
+            InstrKind::UnOp { arg, .. } => vec![*arg],
+            InstrKind::ICmp { lhs, rhs, .. } => vec![*lhs, *rhs],
+            InstrKind::Cast { src, .. } => vec![*src],
+            InstrKind::GlobalAddr { .. }
+            | InstrKind::GlobalArrayAddr { .. }
+            | InstrKind::GlobalStrAddr { .. }
+            | InstrKind::Len { .. }
+            | InstrKind::Alloca { .. } => vec![],
+            InstrKind::ElemAddr { base, index, .. } => vec![*base, *index],
+            InstrKind::Load { mem, addr, .. } => vec![*mem, *addr],
+            InstrKind::Store {
+                mem, addr, value, ..
+            } => vec![*mem, *addr, *value],
+            InstrKind::Call { mem, args, .. } | InstrKind::CallImport { mem, args, .. } => {
+                let mut uses = vec![*mem];
+                uses.extend_from_slice(args);
+                uses
+            }
+            InstrKind::Assign { src, .. } => vec![*src],
+        }
+    }
+
+    /// Returns all `ValueId`s used by the given `Terminator`.
+    pub fn terminator_uses(term: &Terminator) -> Vec<ValueId> {
+        match term {
+            Terminator::Br { mem, .. } => vec![*mem],
+            Terminator::CBr { mem, cond, .. } => vec![*mem, *cond],
+            Terminator::Ret { mem, value } => vec![*mem, *value],
+            Terminator::RetVoid { mem } => vec![*mem],
+            Terminator::Unreachable => vec![],
+        }
+    }
+
+    /// Populate `ValueInfo::use_chain` for every value in `func`.
+    ///
+    /// Scans all phi nodes and instructions; for each operand `v`, appends the
+    /// enclosing instruction's `InstrId` to `v`'s `use_chain`.  Any previously
+    /// stored use-chains are cleared first so the method is idempotent.
+    ///
+    /// Terminator uses are **not** recorded here because `Terminator` carries no
+    /// `InstrId`; callers that need terminator operands should call
+    /// `SSA_CFG_Compiler::terminator_uses` separately.
+    pub fn populate_use_chains_in_function(func: &mut FunctionIR) {
+        // Clear existing chains so repeated calls produce correct results.
+        for info in func.values.values_mut() {
+            info.use_chain.clear();
+        }
+
+        for block in &func.blocks {
+            // Phi incoming edges: the source value is used by the phi instruction.
+            for phi in &block.phis {
+                for &(_, src) in &phi.incomings {
+                    if let Some(info) = func.values.get_mut(&src) {
+                        info.use_chain.push(phi.id);
+                    }
+                }
+            }
+
+            // Regular instructions.
+            for instr in &block.instrs {
+                for used in Self::instr_uses(&instr.kind) {
+                    if let Some(info) = func.values.get_mut(&used) {
+                        info.use_chain.push(instr.id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Populate use-chains for every value across all functions in the program IR.
+    ///
+    /// Safe to call multiple times — each invocation recomputes from scratch.
+    /// Typically called after `remove_phis()` so that the phi-elimination
+    /// `Assign` instructions are included in the chains.
+    pub fn populate_use_chains(&mut self) {
+        for func in self.program_ir.functions.values_mut() {
+            Self::populate_use_chains_in_function(func);
         }
     }
 }

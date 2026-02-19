@@ -193,59 +193,54 @@ fn compute_layout(
 // Variable declarations tracking
 // ─────────────────────────────────────────────
 
-fn collect_variable_declarations(func: &FunctionIR) -> Vec<(String, String, String)> {
-    let mut declarations: Vec<(String, String, String)> = Vec::new();
+/// One row in the def-use chain panel.
+struct DefUseRow {
+    display_name: String, // e.g. "%v3«x»"
+    ty_str: String,
+    def_str: String,        // "[i5]" or "(param)"
+    uses: Vec<String>,      // ["[i8]", "[i12]"]
+    is_named: bool,         // true if the value has an org_name
+}
 
-    for block in &func.blocks {
-        // Check memory phi
-        if let Some(mem_phi) = &block.mem_in {
-            if let Some(info) = func.values.get(&mem_phi.result) {
-                if !info.org_name.is_empty() {
-                    declarations.push((
-                        format!("%v{}", mem_phi.result.0),
-                        format_type(&info.ty),
-                        format!("i{}", mem_phi.id.0),
-                    ));
-                }
-            }
-        }
+fn collect_def_use_rows(func: &FunctionIR) -> Vec<DefUseRow> {
+    let mut rows: Vec<(u32, DefUseRow)> = func
+        .values
+        .iter()
+        .filter(|(_, info)| {
+            info.ty != Type::Mem && info.ty != Type::Void && info.ty != Type::None
+        })
+        .map(|(vid, info)| {
+            let display_name = if info.org_name.is_empty() {
+                format!("%v{}", vid.0)
+            } else {
+                format!("%v{}  «{}»", vid.0, info.org_name)
+            };
+            let ty_str = format_type(&info.ty);
+            let def_str = match info.declared_by {
+                Some(iid) => format!("[i{}]", iid.0),
+                None => "(param)".to_string(),
+            };
+            let uses: Vec<String> = info
+                .use_chain
+                .iter()
+                .map(|iid| format!("[i{}]", iid.0))
+                .collect();
+            let is_named = !info.org_name.is_empty();
+            (
+                vid.0,
+                DefUseRow {
+                    display_name,
+                    ty_str,
+                    def_str,
+                    uses,
+                    is_named,
+                },
+            )
+        })
+        .collect();
 
-        // Check variable phis
-        for phi in &block.phis {
-            if let Some(info) = func.values.get(&phi.result) {
-                if !info.org_name.is_empty() {
-                    declarations.push((
-                        format!("%v{}", phi.result.0),
-                        format_type(&info.ty),
-                        format!("i{}", phi.id.0),
-                    ));
-                }
-            }
-        }
-
-        // Check instructions
-        for instr in &block.instrs {
-            for result_val in &instr.results {
-                if let Some(info) = func.values.get(result_val) {
-                    if !info.org_name.is_empty() {
-                        declarations.push((
-                            format!("%v{}", result_val.0),
-                            format_type(&info.ty),
-                            format!("i{}", instr.id.0),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    // Sort by variable ID number for easier lookup
-    declarations.sort_by(|a, b| {
-        let a_num = a.0.trim_start_matches("%v").parse::<u32>().unwrap_or(0);
-        let b_num = b.0.trim_start_matches("%v").parse::<u32>().unwrap_or(0);
-        a_num.cmp(&b_num)
-    });
-    declarations
+    rows.sort_by_key(|(id, _)| *id);
+    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 // ─────────────────────────────────────────────
@@ -718,6 +713,21 @@ details[open] summary::before {{
     color: #f9e2af;
     font-size: 11px;
 }}
+.var-uses {{
+    color: #cba6f7;
+    font-size: 11px;
+    margin-top: 2px;
+    word-break: break-all;
+}}
+.var-uses-empty {{
+    color: #585b70;
+    font-size: 11px;
+    font-style: italic;
+    margin-top: 2px;
+}}
+.var-item-named {{
+    border-left-color: #f9e2af;
+}}
 .globals {{
     background: #181825;
     border: 1px solid #313244;
@@ -781,35 +791,59 @@ details[open] summary::before {{
 
         writeln!(html, r#"<div class="function-content">"#).unwrap();
 
-        // Side panel with variable declarations
-        let var_decls = collect_variable_declarations(func);
+        // Side panel: def-use chains for all allocatable values
+        let def_use_rows = collect_def_use_rows(func);
         writeln!(html, r#"<div class="side-panel">"#).unwrap();
-        writeln!(html, r#"<h3>Variable Declarations</h3>"#).unwrap();
+        writeln!(html, r#"<h3>Def-Use Chains</h3>"#).unwrap();
         writeln!(html, r#"<div class="var-list">"#).unwrap();
 
-        if var_decls.is_empty() {
-            writeln!(html, r#"<div style="color: #585b70; font-style: italic;">No named variables</div>"#).unwrap();
+        if def_use_rows.is_empty() {
+            writeln!(
+                html,
+                r#"<div style="color: #585b70; font-style: italic;">No values</div>"#
+            )
+            .unwrap();
         } else {
-            for (var_name, var_type, instr_id) in var_decls {
-                writeln!(html, r#"<div class="var-item">"#).unwrap();
+            for row in &def_use_rows {
+                // Named variables get a highlighted border colour.
+                let item_class = if row.is_named {
+                    r#"var-item var-item-named"#
+                } else {
+                    "var-item"
+                };
+                writeln!(html, r#"<div class="{}">"#, item_class).unwrap();
                 writeln!(
                     html,
                     r#"<div class="var-name">{}</div>"#,
-                    html_escape(&var_name)
+                    html_escape(&row.display_name)
                 )
                 .unwrap();
                 writeln!(
                     html,
                     r#"<div class="var-type">type: {}</div>"#,
-                    html_escape(&var_type)
+                    html_escape(&row.ty_str)
                 )
                 .unwrap();
                 writeln!(
                     html,
-                    r#"<div class="var-instr">declared by: [{}]</div>"#,
-                    html_escape(&instr_id)
+                    r#"<div class="var-instr">def: {}</div>"#,
+                    html_escape(&row.def_str)
                 )
                 .unwrap();
+                if row.uses.is_empty() {
+                    writeln!(
+                        html,
+                        r#"<div class="var-uses-empty">uses: —</div>"#
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        html,
+                        r#"<div class="var-uses">uses: {}</div>"#,
+                        html_escape(&row.uses.join(", "))
+                    )
+                    .unwrap();
+                }
                 writeln!(html, r#"</div>"#).unwrap();
             }
         }

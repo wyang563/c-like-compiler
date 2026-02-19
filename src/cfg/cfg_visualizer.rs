@@ -68,6 +68,9 @@ fn visualize_function_ir(output: &mut String, func: &FunctionIR) {
             }
         }
     }
+
+    // def-use chains
+    render_def_use_chains(output, func);
 }
 
 /// Build a map from each BlockId to its labelled successor edges.
@@ -417,6 +420,70 @@ pub(super) fn format_terminator(term: &Terminator, values: &HashMap<ValueId, Val
             )
         }
         Terminator::Unreachable => "unreachable".into(),
+    }
+}
+
+fn render_def_use_chains(output: &mut String, func: &FunctionIR) {
+    // Collect all register-allocatable values (skip Mem / Void / None tokens).
+    let mut entries: Vec<(&ValueId, &ValueInfo)> = func
+        .values
+        .iter()
+        .filter(|(_, info)| {
+            info.ty != Type::Mem && info.ty != Type::Void && info.ty != Type::None
+        })
+        .collect();
+    entries.sort_by_key(|(vid, _)| vid.0);
+
+    if entries.is_empty() {
+        return;
+    }
+
+    writeln!(output).unwrap();
+    writeln!(output, "  Def-Use Chains:").unwrap();
+
+    // Compute column widths for alignment.
+    let mut max_name = 0usize;
+    let mut max_ty = 0usize;
+    let rows: Vec<(String, String, String, String)> = entries
+        .iter()
+        .map(|(vid, info)| {
+            let name = if info.org_name.is_empty() {
+                format!("%v{}", vid.0)
+            } else {
+                format!("%v{}«{}»", vid.0, info.org_name)
+            };
+            let ty = format_type(&info.ty);
+            let def_str = match info.declared_by {
+                Some(iid) => format!("[i{}]", iid.0),
+                None => "(param)".to_string(),
+            };
+            let uses_str = if info.use_chain.is_empty() {
+                "—".to_string()
+            } else {
+                info.use_chain
+                    .iter()
+                    .map(|iid| format!("[i{}]", iid.0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            max_name = max_name.max(name.len());
+            max_ty = max_ty.max(ty.len());
+            (name, ty, def_str, uses_str)
+        })
+        .collect();
+
+    for (name, ty, def_str, uses_str) in &rows {
+        writeln!(
+            output,
+            "    {name:<name_w$} : {ty:<ty_w$}  def: {def:<9}  uses: {uses}",
+            name = name,
+            ty = ty,
+            def = def_str,
+            uses = uses_str,
+            name_w = max_name,
+            ty_w = max_ty,
+        )
+        .unwrap();
     }
 }
 

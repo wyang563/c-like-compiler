@@ -22,6 +22,7 @@ pub fn assemble(
 
                     // run optimizations
                     ssa_cfg_compiler.remove_phis();
+                    ssa_cfg_compiler.populate_use_chains();
 
                     if debug {
                         visualize_program_ir(&ssa_cfg_compiler.program_ir);
