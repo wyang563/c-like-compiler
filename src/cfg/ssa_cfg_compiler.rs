@@ -40,7 +40,7 @@ struct ShortCircuitCtx {
 #[allow(non_camel_case_types)]
 pub struct SSA_CFG_Compiler {
     // ==================== Final Output ====================
-    program_ir: ProgramIR,
+    pub program_ir: ProgramIR,
 
     // ==================== Symbol Table & Scope ====================
     symbol_table: SymbolTable,
@@ -518,6 +518,78 @@ impl SSA_CFG_Compiler {
                 .get_mut(scope_ind)
                 .unwrap()
                 .insert(var_name.clone(), var_phi);
+        }
+    }
+
+    // ==================== Phi Elimination ====================
+
+    /// Eliminate all phi nodes across the entire program by inserting `Assign`
+    /// instructions into predecessor blocks.
+    ///
+    /// Must be called after `compile_to_ssa_cfg` so that `next_value_id` and
+    /// `next_instr_id` are already past every allocated ID — no scanning needed.
+    pub fn remove_phis(&mut self) {
+        let func_names: Vec<String> = self.program_ir.functions.keys().cloned().collect();
+        for func_name in func_names {
+            // Temporarily move the function into cur_func so that new_value /
+            // get_next_instr_id can operate on it, then put it back.
+            let func = self.program_ir.functions.remove(&func_name).unwrap();
+            self.cur_func = Some(func);
+            self.remove_phis_in_function();
+            let func = self.cur_func.take().unwrap();
+            self.program_ir.functions.insert(func_name, func);
+        }
+    }
+
+    /// Eliminate phi nodes in `self.cur_func`.
+    ///
+    /// Uses a two-phase parallel-copy approach (read-all-then-write-all) to
+    /// correctly handle swap-like phis where one phi's result is an incoming
+    /// value for another phi from the same predecessor.
+    pub fn remove_phis_in_function(&mut self) {
+        // Collect all phi copies: for each phi in every block, record one
+        // (pred_id, src, dst, ty) entry per incoming edge.
+        // Phi incoming values are always defined in predecessor blocks (SSA
+        // invariant), so sources and destinations never alias — no temporaries
+        // are needed.
+        let all_copies: Vec<(BlockId, ValueId, ValueId, Type)> = {
+            let func = self.cur_func.as_ref().unwrap();
+            let mut result = Vec::new();
+            for block in &func.blocks {
+                for phi in &block.phis {
+                    if matches!(phi.ty, Type::Mem | Type::Void | Type::None) {
+                        continue;
+                    }
+                    for &(pred_id, src_val) in &phi.incomings {
+                        result.push((pred_id, src_val, phi.result, phi.ty.clone()));
+                    }
+                }
+            }
+            result
+        };
+
+        // Build the Assign instructions to append to each predecessor block.
+        let mut inserts: HashMap<usize, Vec<Instr>> = HashMap::new();
+        for (pred_id, src, dst, ty) in all_copies {
+            let pred_idx = self.cur_func.as_ref().unwrap().block_id_to_ind[&pred_id];
+            let instr_id = InstrId(self.get_next_instr_id());
+            inserts.entry(pred_idx).or_default().push(Instr {
+                id: instr_id,
+                results: vec![dst],
+                kind: InstrKind::Assign { ty, src },
+            });
+        }
+
+        // Append the generated Assign instructions to each predecessor block.
+        let func = self.cur_func.as_mut().unwrap();
+        for (pred_idx, new_instrs) in inserts {
+            func.blocks[pred_idx].instrs.extend(new_instrs);
+        }
+
+        // Remove all phi nodes (both value phis and mem_in) from every block.
+        for block in &mut func.blocks {
+            block.phis.clear();
+            block.mem_in = None;
         }
     }
 }
@@ -2112,7 +2184,7 @@ impl Visitor for SSA_CFG_Compiler {
     }
 }
 
-pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> ProgramIR {
+pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> SSA_CFG_Compiler {
     let mut ssa_cfg_compiler = SSA_CFG_Compiler {
         // Output
         program_ir: ProgramIR {
@@ -2162,5 +2234,5 @@ pub fn compile_to_ssa_cfg(ast: AST::Program, symbol_table: SymbolTable) -> Progr
     };
     ssa_cfg_compiler.visit_program(&ast);
 
-    return ssa_cfg_compiler.program_ir;
+    return ssa_cfg_compiler;
 }
