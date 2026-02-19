@@ -19,6 +19,8 @@ pub fn assemble(
                 Ok(symbol_table) => {
                     // Create SSA form CFG and eliminate phi nodes
                     let mut ssa_cfg_compiler = compile_to_ssa_cfg(ast, symbol_table);
+
+                    // run optimizations
                     ssa_cfg_compiler.remove_phis();
 
                     if debug {

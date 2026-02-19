@@ -522,12 +522,6 @@ impl SSA_CFG_Compiler {
     }
 
     // ==================== Phi Elimination ====================
-
-    /// Eliminate all phi nodes across the entire program by inserting `Assign`
-    /// instructions into predecessor blocks.
-    ///
-    /// Must be called after `compile_to_ssa_cfg` so that `next_value_id` and
-    /// `next_instr_id` are already past every allocated ID — no scanning needed.
     pub fn remove_phis(&mut self) {
         let func_names: Vec<String> = self.program_ir.functions.keys().cloned().collect();
         for func_name in func_names {
@@ -542,16 +536,7 @@ impl SSA_CFG_Compiler {
     }
 
     /// Eliminate phi nodes in `self.cur_func`.
-    ///
-    /// Uses a two-phase parallel-copy approach (read-all-then-write-all) to
-    /// correctly handle swap-like phis where one phi's result is an incoming
-    /// value for another phi from the same predecessor.
     pub fn remove_phis_in_function(&mut self) {
-        // Collect all phi copies: for each phi in every block, record one
-        // (pred_id, src, dst, ty) entry per incoming edge.
-        // Phi incoming values are always defined in predecessor blocks (SSA
-        // invariant), so sources and destinations never alias — no temporaries
-        // are needed.
         let all_copies: Vec<(BlockId, ValueId, ValueId, Type)> = {
             let func = self.cur_func.as_ref().unwrap();
             let mut result = Vec::new();
