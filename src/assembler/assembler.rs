@@ -4,6 +4,7 @@ use super::super::cfg::ssa_cfg_compiler::compile_to_ssa_cfg;
 use super::super::parser::parser::parse_file;
 use super::super::semantics::semantics::interpret_file;
 use super::super::utils::cli::{CodegenBackend, Optimization};
+use super::ig_visualizer::{generate_html_ig, print_interference_graphs};
 use std::collections::HashSet;
 
 pub fn assemble(
@@ -22,11 +23,13 @@ pub fn assemble(
 
                     // run optimizations
                     ssa_cfg_compiler.remove_phis();
-                    // ssa_cfg_compiler.populate_use_chains();
+                    ssa_cfg_compiler.populate_use_chains();
 
                     if debug {
                         visualize_program_ir(&ssa_cfg_compiler.program_ir);
                         generate_html_cfg(&ssa_cfg_compiler.program_ir, "cfg_output.html");
+                        print_interference_graphs(&ssa_cfg_compiler.program_ir);
+                        generate_html_ig(&ssa_cfg_compiler.program_ir, "ig_output.html");
                     }
 
                     // TODO: run enabled optimizations on CFG
