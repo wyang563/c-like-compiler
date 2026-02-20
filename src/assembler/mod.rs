@@ -5,3 +5,4 @@ pub mod codegen_no_reg;
 pub mod ig_visualizer;
 pub mod interference_graph;
 pub mod liveness;
+pub mod reg_alloc;

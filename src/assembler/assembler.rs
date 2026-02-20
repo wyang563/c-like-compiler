@@ -5,6 +5,7 @@ use super::super::parser::parser::parse_file;
 use super::super::semantics::semantics::interpret_file;
 use super::super::utils::cli::{CodegenBackend, Optimization};
 use super::ig_visualizer::{generate_html_ig, print_interference_graphs};
+use super::reg_alloc::{allocate_program, Location};
 use std::collections::HashSet;
 
 pub fn assemble(
@@ -21,10 +22,11 @@ pub fn assemble(
                     // Create SSA form CFG and eliminate phi nodes
                     let mut ssa_cfg_compiler = compile_to_ssa_cfg(ast, symbol_table);
 
-                    // run optimizations
+                    // run enabled optimizations on CFG
                     ssa_cfg_compiler.remove_phis();
                     ssa_cfg_compiler.populate_use_chains();
 
+                    // post optimization debug prints
                     if debug {
                         visualize_program_ir(&ssa_cfg_compiler.program_ir);
                         generate_html_cfg(&ssa_cfg_compiler.program_ir, "cfg_output.html");
@@ -32,12 +34,12 @@ pub fn assemble(
                         generate_html_ig(&ssa_cfg_compiler.program_ir, "ig_output.html");
                     }
 
-                    // TODO: run enabled optimizations on CFG
-
                     // Code generation
                     let asm_output = match backend {
                         CodegenBackend::Reg => {
-                            let mut codegen = super::codegen::CodeGenerator::new();
+                            // reg allocation
+                            let program_alloc = allocate_program(&ssa_cfg_compiler.program_ir);
+                            let mut codegen = super::codegen::CodeGenerator::new(program_alloc);
                             codegen.generate(&ssa_cfg_compiler.program_ir)
                         }
                         CodegenBackend::NoReg => {

@@ -247,16 +247,11 @@ pub fn build_interference_graph(func: &FunctionIR, liveness: &LivenessInfo) -> I
                 .filter(|&v| is_allocatable(v, func))
                 .collect();
 
-            // Retrieve the live set immediately after this instruction.
-            // If liveness has no entry (e.g. unreachable code), skip.
             let live_set = match liveness.live_after.get(&instr.id) {
                 Some(s) => s,
                 None => continue,
             };
 
-            // If this is an Assign (phi-elimination copy), record the
-            // (dst, src) pair as copy-related so the coloring pass can
-            // attempt to coalesce them instead of adding an interference edge.
             let copy_src: Option<ValueId> = match &instr.kind {
                 InstrKind::Assign { src, .. } => Some(*src),
                 _ => None,

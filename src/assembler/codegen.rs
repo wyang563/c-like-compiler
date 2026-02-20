@@ -5,11 +5,17 @@ use super::super::cfg::three_address_code::{
     Instr, InstrKind, ProgramIR, Symbol, Terminator, Type, UnOp, ValueId,
 };
 
-pub struct CodeGenerator {}
+use super::reg_alloc::RegAlloc;
+
+pub struct CodeGenerator {
+    program_alloc: HashMap<String, RegAlloc>,
+}
 
 impl CodeGenerator {
-    pub fn new() -> Self {
-        CodeGenerator {}
+    pub fn new(program_alloc: HashMap<String, RegAlloc>) -> Self {
+        CodeGenerator {
+            program_alloc: program_alloc,
+        }
     }
 
     pub fn generate(&mut self, _ssa_cfg: &ProgramIR) -> String {
